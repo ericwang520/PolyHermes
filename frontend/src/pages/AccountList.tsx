@@ -355,9 +355,11 @@ const AccountList: React.FC = () => {
       render: (walletType: string) => {
         if (!walletType) return '-'
         const type = walletType.toLowerCase()
+        const label = type === 'deposit' ? 'Deposit' : type === 'magic' ? 'Magic' : 'Safe'
+        const color = type === 'deposit' ? 'gold' : type === 'magic' ? 'purple' : 'blue'
         return (
-          <Tag color={type === 'magic' ? 'purple' : 'blue'}>
-            {type === 'magic' ? 'Magic' : 'Safe'}
+          <Tag color={color}>
+            {label}
           </Tag>
         )
       }
@@ -612,8 +614,8 @@ const AccountList: React.FC = () => {
                           </div>
                           <div style={{ fontSize: '12px' }}>
                             {account.walletType ? (
-                              <Tag color={account.walletType.toLowerCase() === 'magic' ? 'purple' : 'blue'} style={{ margin: 0 }}>
-                                {account.walletType.toLowerCase() === 'magic' ? 'Magic' : 'Safe'}
+                              <Tag color={account.walletType.toLowerCase() === 'deposit' ? 'gold' : account.walletType.toLowerCase() === 'magic' ? 'purple' : 'blue'} style={{ margin: 0 }}>
+                                {account.walletType.toLowerCase() === 'deposit' ? 'Deposit' : account.walletType.toLowerCase() === 'magic' ? 'Magic' : 'Safe'}
                               </Tag>
                             ) : '-'}
                           </div>
@@ -827,8 +829,8 @@ const AccountList: React.FC = () => {
               </Descriptions.Item>
               {detailAccount.walletType && (
                 <Descriptions.Item label={t('accountList.walletType')}>
-                  <Tag color={detailAccount.walletType.toLowerCase() === 'magic' ? 'purple' : 'blue'}>
-                    {detailAccount.walletType.toLowerCase() === 'magic' ? 'Magic' : 'Safe'}
+                  <Tag color={detailAccount.walletType.toLowerCase() === 'deposit' ? 'gold' : detailAccount.walletType.toLowerCase() === 'magic' ? 'purple' : 'blue'}>
+                    {detailAccount.walletType.toLowerCase() === 'deposit' ? 'Deposit' : detailAccount.walletType.toLowerCase() === 'magic' ? 'Magic' : 'Safe'}
                   </Tag>
                 </Descriptions.Item>
               )}
@@ -1032,4 +1034,3 @@ const AccountList: React.FC = () => {
 }
 
 export default AccountList
-

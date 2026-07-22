@@ -101,11 +101,18 @@ class AccountService(
                 }
             }
 
-            // 5. 获取代理地址（必须成功，否则导入失败）
-            // 根据用户选择的钱包类型计算代理地址
+            // 5. 获取实际持有资产的钱包地址（必须成功，否则导入失败）
             val proxyAddress = runBlocking {
                 val walletTypeEnum = WalletType.fromStringOrDefault(request.walletType, WalletType.MAGIC)
-                val proxyResult = blockchainService.getProxyAddress(request.walletAddress, walletTypeEnum)
+                val proxyResult = if (walletTypeEnum == WalletType.DEPOSIT) {
+                    resolveDepositWalletAddress(request.walletAddress).mapCatching { address ->
+                        address ?: throw IllegalStateException(
+                            "该 EOA 未发现独立的 Deposit Wallet，请选择 Safe/Magic 或先在 Polymarket 完成账户创建"
+                        )
+                    }
+                } else {
+                    blockchainService.getProxyAddress(request.walletAddress, walletTypeEnum)
+                }
                 if (proxyResult.isSuccess) {
                     val address = proxyResult.getOrNull()
                     if (address != null) {
@@ -117,7 +124,7 @@ class AccountService(
                 } else {
                     val error = proxyResult.exceptionOrNull()
                     logger.error("获取代理地址失败: ${error?.message}")
-                    throw IllegalStateException("获取代理地址失败: ${error?.message}。请确保已配置 Ethereum RPC URL 且 RPC 节点可用")
+                    throw IllegalStateException("获取资产钱包地址失败: ${error?.message}")
                 }
             }
 
@@ -168,6 +175,30 @@ class AccountService(
 
             val saved = accountRepository.save(account)
 
+            // 新版 Deposit Wallet 的 CLOB 缓存必须按 signature_type=3 刷新。
+            // 刷新失败不撤销导入；下单错误会保留明确日志，用户仍可在 Polymarket 网页完成授权。
+            if (WalletType.fromStringOrDefault(saved.walletType) == WalletType.DEPOSIT) {
+                runBlocking {
+                    try {
+                        val authenticatedClobApi = retrofitFactory.createClobApi(
+                            apiKeyCreds.apiKey,
+                            apiKeyCreds.secret,
+                            apiKeyCreds.passphrase,
+                            saved.walletAddress
+                        )
+                        val response = authenticatedClobApi.updateBalanceAllowance(
+                            assetType = "COLLATERAL",
+                            signatureType = 3
+                        )
+                        if (!response.isSuccessful) {
+                            logger.warn("Deposit Wallet 余额缓存刷新失败: HTTP ${response.code()}")
+                        }
+                    } catch (e: Exception) {
+                        logger.warn("Deposit Wallet 余额缓存刷新异常: ${e.message}")
+                    }
+                }
+            }
+
             // 刷新订单推送订阅（如果账户启用且有 API 凭证）
             orderPushService.refreshSubscriptions()
 
@@ -179,187 +210,130 @@ class AccountService(
     }
 
     /**
-     * 检查代理地址选项（用于账户导入前选择代理类型）
-     * 私钥导入：返回 Magic 和 Safe 两个选项
-     * 助记词导入：仅返回 Safe 选项
+     * 检查资产钱包选项（用于账户导入前选择钱包架构）。
+     * 若 Profile API 返回一个不同于旧 Safe/Magic 推导结果的 proxyWallet，优先列为 Deposit Wallet。
      */
     suspend fun checkProxyOptions(request: CheckProxyOptionsRequest): Result<CheckProxyOptionsResponse> {
         return try {
-            // 1. 验证钱包地址格式
             if (!isValidWalletAddress(request.walletAddress)) {
                 return Result.failure(IllegalArgumentException("无效的钱包地址格式"))
             }
-
-            // 2. 验证至少提供了私钥或助记词之一
             if (request.privateKey.isNullOrBlank() && request.mnemonic.isNullOrBlank()) {
                 return Result.failure(IllegalArgumentException("必须提供私钥或助记词"))
             }
 
-            val options = mutableListOf<ProxyOptionDto>()
+            val options = coroutineScope {
+                val depositDeferred = async { resolveDepositWalletAddress(request.walletAddress) }
+                val safeDeferred = async { buildLegacyProxyOption(request.walletAddress, WalletType.SAFE) }
+                val magicDeferred = async { buildLegacyProxyOption(request.walletAddress, WalletType.MAGIC) }
 
-            // 3. 判断导入类型
-            val isPrivateKeyImport = !request.privateKey.isNullOrBlank()
-
-            if (isPrivateKeyImport) {
-                // 私钥导入：并行获取 Magic 和 Safe 代理地址及资产
-                coroutineScope {
-                    val magicDeferred = async {
-                        try {
-                            val proxyAddress = blockchainService.getProxyAddress(request.walletAddress, WalletType.MAGIC).getOrNull()
-                            if (proxyAddress != null) {
-                                val balance = blockchainService.getWalletBalance(proxyAddress).getOrNull()
-                                ProxyOptionDto(
-                                    walletType = WalletType.MAGIC.value,
-                                    proxyAddress = proxyAddress,
-                                    descriptionKey = "accountImport.proxyOption.magic.description",
-                                    availableBalance = balance?.availableBalance ?: "0",
-                                    positionBalance = balance?.positionBalance ?: "0",
-                                    totalBalance = balance?.totalBalance ?: "0",
-                                    positionCount = balance?.positions?.size ?: 0,
-                                    hasAssets = (balance?.availableBalance?.toSafeBigDecimal()?.gt(BigDecimal.ZERO) == true) ||
-                                            (balance?.positionBalance?.toSafeBigDecimal()?.gt(BigDecimal.ZERO) == true) ||
-                                            (balance?.positions?.isNotEmpty() == true),
-                                    error = null
-                                )
-                            } else {
-                                ProxyOptionDto(
-                                    walletType = "magic",
-                                    proxyAddress = "",
-                                    descriptionKey = "accountImport.proxyOption.magic.description",
-                                    availableBalance = "0",
-                                    positionBalance = "0",
-                                    totalBalance = "0",
-                                    positionCount = 0,
-                                    hasAssets = false,
-                                    error = "获取 Magic 代理地址失败"
-                                )
-                            }
-                        } catch (e: Exception) {
-                            logger.warn("获取 Magic 代理地址或资产失败: ${e.message}", e)
-                            ProxyOptionDto(
-                                walletType = "magic",
-                                proxyAddress = blockchainService.calculateMagicProxyAddress(request.walletAddress),
-                                descriptionKey = "accountImport.proxyOption.magic.description",
-                                availableBalance = "0",
-                                positionBalance = "0",
-                                totalBalance = "0",
-                                positionCount = 0,
-                                hasAssets = false,
-                                error = "获取资产信息失败: ${e.message}"
-                            )
+                val resolved = mutableListOf<ProxyOptionDto>()
+                depositDeferred.await().fold(
+                    onSuccess = { address ->
+                        if (address != null) {
+                            resolved.add(buildProxyOption(WalletType.DEPOSIT, address))
                         }
+                    },
+                    onFailure = { e ->
+                        logger.warn("获取 Deposit Wallet 失败: ${e.message}")
+                        resolved.add(errorProxyOption(WalletType.DEPOSIT, "获取 Deposit Wallet 失败: ${e.message}"))
                     }
-
-                    val safeDeferred = async {
-                        try {
-                            val proxyAddress = blockchainService.getProxyAddress(request.walletAddress, WalletType.SAFE).getOrNull()
-                            if (proxyAddress != null) {
-                                val balance = blockchainService.getWalletBalance(proxyAddress).getOrNull()
-                                ProxyOptionDto(
-                                    walletType = WalletType.SAFE.value,
-                                    proxyAddress = proxyAddress,
-                                    descriptionKey = "accountImport.proxyOption.safe.description",
-                                    availableBalance = balance?.availableBalance ?: "0",
-                                    positionBalance = balance?.positionBalance ?: "0",
-                                    totalBalance = balance?.totalBalance ?: "0",
-                                    positionCount = balance?.positions?.size ?: 0,
-                                    hasAssets = (balance?.availableBalance?.toSafeBigDecimal()?.gt(BigDecimal.ZERO) == true) ||
-                                            (balance?.positionBalance?.toSafeBigDecimal()?.gt(BigDecimal.ZERO) == true) ||
-                                            (balance?.positions?.isNotEmpty() == true),
-                                    error = null
-                                )
-                            } else {
-                                ProxyOptionDto(
-                                    walletType = "safe",
-                                    proxyAddress = "",
-                                    descriptionKey = "accountImport.proxyOption.safe.description",
-                                    availableBalance = "0",
-                                    positionBalance = "0",
-                                    totalBalance = "0",
-                                    positionCount = 0,
-                                    hasAssets = false,
-                                    error = "获取 Safe 代理地址失败"
-                                )
-                            }
-                        } catch (e: Exception) {
-                            logger.warn("获取 Safe 代理地址或资产失败: ${e.message}", e)
-                            ProxyOptionDto(
-                                walletType = "safe",
-                                proxyAddress = "",
-                                descriptionKey = "accountImport.proxyOption.safe.description",
-                                availableBalance = "0",
-                                positionBalance = "0",
-                                totalBalance = "0",
-                                positionCount = 0,
-                                hasAssets = false,
-                                error = "获取资产信息失败: ${e.message}"
-                            )
-                        }
-                    }
-
-                    val magicOption = magicDeferred.await()
-                    val safeOption = safeDeferred.await()
-                    // Safe 在前，Magic 在后
-                    options.add(safeOption)
-                    options.add(magicOption)
+                )
+                resolved.add(safeDeferred.await())
+                if (!request.privateKey.isNullOrBlank()) {
+                    resolved.add(magicDeferred.await())
                 }
-            } else {
-                // 助记词导入：仅获取 Safe 代理地址及资产
-                try {
-                    val proxyAddress = blockchainService.getProxyAddress(request.walletAddress, WalletType.SAFE).getOrNull()
-                    if (proxyAddress != null) {
-                        val balance = blockchainService.getWalletBalance(proxyAddress).getOrNull()
-                        options.add(
-                            ProxyOptionDto(
-                                walletType = "safe",
-                                proxyAddress = proxyAddress,
-                                descriptionKey = "accountImport.proxyOption.safe.description",
-                                availableBalance = balance?.availableBalance ?: "0",
-                                positionBalance = balance?.positionBalance ?: "0",
-                                totalBalance = balance?.totalBalance ?: "0",
-                                positionCount = balance?.positions?.size ?: 0,
-                                hasAssets = (balance?.availableBalance?.toSafeBigDecimal()?.gt(BigDecimal.ZERO) == true) ||
-                                        (balance?.positionBalance?.toSafeBigDecimal()?.gt(BigDecimal.ZERO) == true) ||
-                                        (balance?.positions?.isNotEmpty() == true),
-                                error = null
-                            )
-                        )
-                    } else {
-                        options.add(
-                            ProxyOptionDto(
-                                walletType = "safe",
-                                proxyAddress = "",
-                                descriptionKey = "accountImport.proxyOption.safe.description",
-                                availableBalance = "0",
-                                positionBalance = "0",
-                                totalBalance = "0",
-                                positionCount = 0,
-                                hasAssets = false,
-                                error = "获取 Safe 代理地址失败"
-                            )
-                        )
-                    }
-                } catch (e: Exception) {
-                    logger.warn("获取 Safe 代理地址或资产失败: ${e.message}", e)
-                    options.add(
-                        ProxyOptionDto(
-                            walletType = "safe",
-                            proxyAddress = "",
-                            descriptionKey = "accountImport.proxyOption.safe.description",
-                            availableBalance = "0",
-                            positionBalance = "0",
-                            totalBalance = "0",
-                            positionCount = 0,
-                            hasAssets = false,
-                            error = "获取资产信息失败: ${e.message}"
-                        )
-                    )
-                }
+                resolved
             }
 
             Result.success(CheckProxyOptionsResponse(options = options))
         } catch (e: Exception) {
             logger.error("检查代理地址选项失败: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    private suspend fun buildLegacyProxyOption(walletAddress: String, walletType: WalletType): ProxyOptionDto {
+        return try {
+            val proxyAddress = blockchainService.getProxyAddress(walletAddress, walletType).getOrThrow()
+            buildProxyOption(walletType, proxyAddress)
+        } catch (e: Exception) {
+            logger.warn("获取 ${walletType.name} 地址或资产失败: ${e.message}")
+            errorProxyOption(walletType, "获取资产信息失败: ${e.message}")
+        }
+    }
+
+    private suspend fun buildProxyOption(walletType: WalletType, proxyAddress: String): ProxyOptionDto {
+        val balance = blockchainService.getWalletBalance(proxyAddress).getOrElse { error ->
+            logger.warn("获取 ${walletType.name} 资产失败: ${error.message}")
+            return errorProxyOption(
+                walletType = walletType,
+                error = "获取资产信息失败: ${error.message}",
+                proxyAddress = proxyAddress
+            )
+        }
+        return ProxyOptionDto(
+            walletType = walletType.value,
+            proxyAddress = proxyAddress,
+            descriptionKey = "accountImport.proxyOption.${walletType.value}.description",
+            availableBalance = balance.availableBalance,
+            positionBalance = balance.positionBalance,
+            totalBalance = balance.totalBalance,
+            positionCount = balance.positions.size,
+            hasAssets = balance.availableBalance.toSafeBigDecimal().gt(BigDecimal.ZERO) ||
+                    balance.positionBalance.toSafeBigDecimal().gt(BigDecimal.ZERO) ||
+                    balance.positions.isNotEmpty(),
+            error = null
+        )
+    }
+
+    private fun errorProxyOption(
+        walletType: WalletType,
+        error: String,
+        proxyAddress: String = ""
+    ): ProxyOptionDto {
+        return ProxyOptionDto(
+            walletType = walletType.value,
+            proxyAddress = proxyAddress,
+            descriptionKey = "accountImport.proxyOption.${walletType.value}.description",
+            availableBalance = "0",
+            positionBalance = "0",
+            totalBalance = "0",
+            positionCount = 0,
+            hasAssets = false,
+            error = error
+        )
+    }
+
+    /**
+     * Profile API 的 proxyWallet 同时服务旧 Safe/Proxy 与新 Deposit Wallet。
+     * 只有当它和旧 Safe/Magic 推导地址都不相同时，才判定为 Deposit Wallet，避免误分类旧账户。
+     */
+    private suspend fun resolveDepositWalletAddress(walletAddress: String): Result<String?> {
+        return try {
+            val response = retrofitFactory.createGammaApi().getPublicProfile(walletAddress)
+            if (!response.isSuccessful) {
+                if (response.code() == 404) return Result.success(null)
+                return Result.failure(IllegalStateException("Profile API 返回 ${response.code()}"))
+            }
+
+            val candidate = response.body()?.proxyWallet?.trim()?.lowercase()
+            if (candidate.isNullOrBlank() || !isValidWalletAddress(candidate)) {
+                return Result.success(null)
+            }
+
+            val magicAddress = blockchainService.calculateMagicProxyAddress(walletAddress).lowercase()
+            val safeAddress = blockchainService.getProxyAddress(walletAddress, WalletType.SAFE)
+                .getOrNull()
+                ?.lowercase()
+            val ownerAddress = walletAddress.lowercase()
+
+            if (candidate == ownerAddress || candidate == magicAddress || candidate == safeAddress) {
+                Result.success(null)
+            } else {
+                Result.success(candidate)
+            }
+        } catch (e: Exception) {
             Result.failure(e)
         }
     }
@@ -468,7 +442,15 @@ class AccountService(
             when (step) {
                 1 -> {
                     val walletType = WalletType.fromStringOrDefault(account.walletType, WalletType.MAGIC)
-                    if (walletType == WalletType.MAGIC) {
+                    if (walletType == WalletType.DEPOSIT) {
+                        val deployed = blockchainService.isProxyDeployed(account.proxyAddress)
+                        Result.success(
+                            ExecuteSetupStepResponse(
+                                success = deployed,
+                                redirectUrl = if (deployed) null else setupStep1RedirectUrl
+                            )
+                        )
+                    } else if (walletType == WalletType.MAGIC) {
                         Result.success(
                             ExecuteSetupStepResponse(
                                 success = false,
@@ -540,6 +522,13 @@ class AccountService(
                     }
                     val privateKey = decryptPrivateKey(account)
                     val walletType = WalletType.fromStringOrDefault(account.walletType, WalletType.SAFE)
+                    if (walletType == WalletType.DEPOSIT) {
+                        return Result.failure(
+                            UnsupportedOperationException(
+                                "Deposit Wallet 授权需使用 WALLET batch；请先在 Polymarket 网页完成一次交易/授权"
+                            )
+                        )
+                    }
                     val approveTxs = setupApprovalSpenders.values.map { spender ->
                         relayClientService.createUsdcApproveTx(spender, unlimitedAllowance)
                     }
@@ -951,6 +940,7 @@ class AccountService(
             try {
                 val privateKey = decryptPrivateKey(account)
                 val walletType = WalletType.fromStringOrDefault(account.walletType, WalletType.SAFE)
+                if (walletType == WalletType.DEPOSIT) continue
                 blockchainService.unwrapWcolForProxy(
                     privateKey = privateKey,
                     proxyAddress = account.proxyAddress,
@@ -1646,6 +1636,16 @@ class AccountService(
                 accounts[accountId] = account
             }
 
+            if (accounts.values.any {
+                    WalletType.fromStringOrDefault(it.walletType, WalletType.SAFE) == WalletType.DEPOSIT
+                }) {
+                return Result.failure(
+                    UnsupportedOperationException(
+                        "Deposit Wallet 赎回需要 Builder Relayer WALLET batch；当前版本仅支持其 CLOB 买卖"
+                    )
+                )
+            }
+
             // 4. 若涉及 Magic 账户，必须已配置 Builder API Key（提前判断，避免执行到深层再报错）
             val hasMagicAccount = accounts.values.any { 
                 WalletType.fromStringOrDefault(it.walletType, WalletType.SAFE) == WalletType.MAGIC 
@@ -1920,6 +1920,11 @@ class AccountService(
         }
         val privateKey = cryptoUtils.decrypt(account.privateKey)
         val walletType = WalletType.fromStringOrDefault(account.walletType, WalletType.SAFE)
+        if (walletType == WalletType.DEPOSIT) {
+            return Result.failure(
+                UnsupportedOperationException("Deposit Wallet wrap 需要 WALLET batch；当前版本请使用 Polymarket 网页入金")
+            )
+        }
         return blockchainService.wrapUsdcToPusd(privateKey, account.proxyAddress, walletType)
     }
 
@@ -1935,5 +1940,3 @@ class AccountService(
         return blockchainService.queryUsdceBalance(account.proxyAddress)
     }
 }
-
-

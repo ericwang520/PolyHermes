@@ -12,6 +12,12 @@ import java.nio.charset.StandardCharsets
  * 参考 EIP-712 标准：https://eips.ethereum.org/EIPS/eip-712
  */
 object Eip712Encoder {
+
+    const val EXCHANGE_ORDER_TYPE_STRING =
+        "Order(uint256 salt,address maker,address signer,uint256 tokenId,uint256 makerAmount,uint256 takerAmount,uint8 side,uint8 signatureType,uint256 timestamp,bytes32 metadata,bytes32 builder)"
+
+    private const val TYPED_DATA_SIGN_TYPE_STRING =
+        "TypedDataSign(Order contents,string name,string version,uint256 chainId,address verifyingContract,bytes32 salt)$EXCHANGE_ORDER_TYPE_STRING"
     
     /**
      * Keccak-256 哈希
@@ -216,22 +222,7 @@ object Eip712Encoder {
         metadata: String,
         builder: String
     ): ByteArray {
-        val orderTypeHash = encodeType(
-            "Order",
-            listOf(
-                "salt" to "uint256",
-                "maker" to "address",
-                "signer" to "address",
-                "tokenId" to "uint256",
-                "makerAmount" to "uint256",
-                "takerAmount" to "uint256",
-                "side" to "uint8",
-                "signatureType" to "uint8",
-                "timestamp" to "uint256",
-                "metadata" to "bytes32",
-                "builder" to "bytes32"
-            )
-        )
+        val orderTypeHash = keccak256(EXCHANGE_ORDER_TYPE_STRING.toByteArray(StandardCharsets.UTF_8))
 
         val saltBytes = encodeUint256(BigInteger.valueOf(salt))
         val makerBytes = encodeAddress(maker)
@@ -268,6 +259,62 @@ object Eip712Encoder {
         System.arraycopy(builderBytes, 0, encoded, offset, 32)
 
         return keccak256(encoded)
+    }
+
+    /**
+     * 为 Deposit Wallet 的 POLY_1271 订单构建 ERC-7739 内层 TypedDataSign digest。
+     * 对应官方 @polymarket/clob-client-v2 ExchangeOrderBuilderV2.buildOrderSignature。
+     */
+    fun encodeDepositWalletOrderDigest(
+        chainId: Long,
+        exchangeContract: String,
+        depositWallet: String,
+        contentsHash: ByteArray
+    ): ByteArray {
+        require(contentsHash.size == 32) { "contentsHash 必须为 32 字节" }
+
+        // EIP-712 依赖类型必须附加到主类型后：TypedDataSign(...)Order(...)
+        val typedDataSignTypeHash = keccak256(TYPED_DATA_SIGN_TYPE_STRING.toByteArray(StandardCharsets.UTF_8))
+        val encoded = ByteArray(32 * 7)
+        var offset = 0
+        System.arraycopy(typedDataSignTypeHash, 0, encoded, offset, 32); offset += 32
+        System.arraycopy(contentsHash, 0, encoded, offset, 32); offset += 32
+        System.arraycopy(encodeString("DepositWallet"), 0, encoded, offset, 32); offset += 32
+        System.arraycopy(encodeString("1"), 0, encoded, offset, 32); offset += 32
+        System.arraycopy(encodeUint256(BigInteger.valueOf(chainId)), 0, encoded, offset, 32); offset += 32
+        System.arraycopy(encodeAddress(depositWallet), 0, encoded, offset, 32); offset += 32
+        // salt = bytes32(0)
+        System.arraycopy(ByteArray(32), 0, encoded, offset, 32)
+
+        val messageHash = keccak256(encoded)
+        return hashStructuredData(
+            domainSeparator = encodeExchangeDomain(chainId, exchangeContract),
+            messageHash = messageHash
+        )
+    }
+
+    /**
+     * ERC-7739 wrapper:
+     * innerSig(65) || appDomainSep(32) || contentsHash(32) || contentsType || uint16_BE(typeLength)
+     */
+    fun wrapPoly1271OrderSignature(
+        innerSignature: ByteArray,
+        appDomainSeparator: ByteArray,
+        contentsHash: ByteArray
+    ): String {
+        require(innerSignature.size == 65) { "innerSignature 必须为 65 字节" }
+        require(appDomainSeparator.size == 32) { "appDomainSeparator 必须为 32 字节" }
+        require(contentsHash.size == 32) { "contentsHash 必须为 32 字节" }
+
+        val contentsType = EXCHANGE_ORDER_TYPE_STRING.toByteArray(StandardCharsets.UTF_8)
+        require(contentsType.size <= 0xffff) { "contentsType 长度超过 uint16" }
+        val lengthBytes = byteArrayOf(
+            ((contentsType.size ushr 8) and 0xff).toByte(),
+            (contentsType.size and 0xff).toByte()
+        )
+
+        val wrapped = innerSignature + appDomainSeparator + contentsHash + contentsType + lengthBytes
+        return Numeric.toHexString(wrapped)
     }
     
     /**
@@ -426,4 +473,3 @@ object Eip712Encoder {
         return keccak256(encoded)
     }
 }
-

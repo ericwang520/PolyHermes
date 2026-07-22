@@ -231,8 +231,12 @@
         "description": "MetaMask Browser Wallet Account (Safe)",
         "title": "Safe Proxy Address"
       },
+      "deposit": {
+        "description": "New Polymarket Deposit Wallet (POLY_1271). Use this when it contains your pUSD balance.",
+        "title": "Deposit Wallet Address"
+      },
       "proxyAddress": "Proxy Address",
-      "proxyAddressHelp": "The proxy address is the wallet address you actually use on Polymarket: Magic for email/social login accounts, Safe for browser wallet (e.g. MetaMask) accounts. Please select the one that matches how you log in to Polymarket.",
+      "proxyAddressHelp": "Select the address that actually holds your Polymarket pUSD and positions.",
       "availableBalance": "Available Balance",
       "positionBalance": "Position Balance",
       "totalBalance": "Total Balance",

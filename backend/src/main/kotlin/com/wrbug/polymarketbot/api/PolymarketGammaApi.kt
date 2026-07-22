@@ -14,6 +14,15 @@ import retrofit2.http.Query
 interface PolymarketGammaApi {
 
     /**
+     * 根据 EOA 查询 Polymarket 公共资料。
+     * 新版账户的 proxyWallet 即实际持有 pUSD/仓位的 Deposit Wallet。
+     */
+    @GET("/public-profile")
+    suspend fun getPublicProfile(
+        @Query("address") address: String
+    ): Response<PublicProfileResponse>
+
+    /**
      * 根据 condition ID 列表获取市场信息
      * 文档: https://docs.polymarket.com/api-reference/markets/list-markets
      * @param conditionIds condition ID 数组（16 进制字符串，如 "0x..."）
@@ -36,6 +45,13 @@ interface PolymarketGammaApi {
     @GET("/events/slug/{slug}")
     suspend fun getEventBySlug(@Path("slug") slug: String): Response<GammaEventBySlugResponse>
 }
+
+data class PublicProfileResponse(
+    val proxyWallet: String? = null,
+    val createdAt: String? = null,
+    val name: String? = null,
+    val pseudonym: String? = null
+)
 
 /**
  * Gamma 按 slug 返回的事件结构
@@ -112,4 +128,3 @@ data class MarketResponse(
     val negRisk: Boolean? = null,       // 事件级 neg risk（部分 API 直接返回在 market）
     val negRiskOther: Boolean? = null  // Market 级 neg risk 标记
 )
-

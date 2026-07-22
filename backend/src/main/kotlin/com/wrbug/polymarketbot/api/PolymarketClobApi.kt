@@ -149,6 +149,14 @@ interface PolymarketClobApi {
      */
     @GET("/auth/derive-api-key")
     suspend fun deriveApiKey(): Response<ApiKeyResponse>
+
+    /** 刷新 CLOB 的链上余额/授权缓存；Deposit Wallet 必须使用 signature_type=3。 */
+    @GET("/balance-allowance/update")
+    suspend fun updateBalanceAllowance(
+        @Query("asset_type") assetType: String,
+        @Query("signature_type") signatureType: Int,
+        @Query("token_id") tokenId: String? = null
+    ): Response<Unit>
     
     /**
      * 获取费率
@@ -380,4 +388,3 @@ data class LatestPriceResponse(
     val bestBid: String?,  // 最高买入价
     val bestAsk: String?   // 最低卖出价
 )
-

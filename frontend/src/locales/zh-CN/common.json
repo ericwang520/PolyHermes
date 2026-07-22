@@ -231,8 +231,12 @@
         "description": "MetaMask 等浏览器钱包账户（Safe）",
         "title": "Safe 代理地址"
       },
+      "deposit": {
+        "description": "新版 Polymarket Deposit Wallet（POLY_1271）。若此地址显示你的 pUSD 余额，请选择此项。",
+        "title": "Deposit Wallet 地址"
+      },
       "proxyAddress": "代理地址",
-      "proxyAddressHelp": "代理地址是您在 Polymarket 上实际使用的钱包地址：Magic 为邮箱/社交登录账户，Safe 为浏览器钱包（如 MetaMask）账户。请选择与您 Polymarket 登录方式一致的一项。",
+      "proxyAddressHelp": "请选择实际持有 Polymarket pUSD 与仓位的地址。",
       "availableBalance": "可用余额",
       "positionBalance": "仓位余额",
       "totalBalance": "总余额",

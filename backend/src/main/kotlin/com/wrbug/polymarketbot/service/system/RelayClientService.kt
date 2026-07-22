@@ -450,6 +450,13 @@ class RelayClientService(
         walletType: WalletType = WalletType.SAFE
     ): Result<String> {
         return try {
+            if (walletType == WalletType.DEPOSIT) {
+                return Result.failure(
+                    UnsupportedOperationException(
+                        "Deposit Wallet 链上操作需要 Builder Relayer WALLET batch；当前版本仅支持 POLY_1271 CLOB 交易"
+                    )
+                )
+            }
             if (proxyAddress.isBlank() || !proxyAddress.startsWith("0x") || proxyAddress.length != 42) {
                 return Result.failure(IllegalArgumentException("proxyAddress 格式错误，必须是有效的以太坊地址"))
             }
@@ -1394,4 +1401,3 @@ class RelayClientService(
         )
     }
 }
-

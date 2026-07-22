@@ -33,12 +33,16 @@ class OrderSigningService {
 
     /**
      * 根据钱包类型返回 CLOB 订单签名类型
-     * @param walletType Magic=邮箱/社交登录, Safe=Web3 钱包
-     * @return 1=POLY_PROXY(Magic), 2=POLY_GNOSIS_SAFE(Safe), 默认 2
+     * @param walletType Magic=邮箱/社交登录, Safe=旧 Web3 钱包, Deposit=新版 Deposit Wallet
+     * @return 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE, 3=POLY_1271
      */
     fun getSignatureTypeForWalletType(walletType: String?): Int {
         val walletTypeEnum = com.wrbug.polymarketbot.enums.WalletType.fromStringOrDefault(walletType, com.wrbug.polymarketbot.enums.WalletType.SAFE)
-        return if (walletTypeEnum == com.wrbug.polymarketbot.enums.WalletType.MAGIC) 1 else 2
+        return when (walletTypeEnum) {
+            com.wrbug.polymarketbot.enums.WalletType.MAGIC -> 1
+            com.wrbug.polymarketbot.enums.WalletType.SAFE -> 2
+            com.wrbug.polymarketbot.enums.WalletType.DEPOSIT -> 3
+        }
     }
 
     // V2 合约地址
@@ -163,7 +167,7 @@ class OrderSigningService {
      * @param side BUY 或 SELL
      * @param price 价格
      * @param size 数量
-     * @param signatureType 签名类型（1: Email/Magic, 2: Browser Wallet, 0: EOA）
+     * @param signatureType 签名类型（1: Email/Magic, 2: Browser Wallet, 3: Deposit Wallet, 0: EOA）
      * @param exchangeContract 签约用 exchange 合约地址；null 时用标准 CTF Exchange，neg risk 市场需传 Neg Risk Exchange
      * @return 签名的订单对象
      */
@@ -182,7 +186,7 @@ class OrderSigningService {
             val cleanPrivateKey = privateKey.removePrefix("0x")
             val privateKeyBigInt = BigInteger(cleanPrivateKey, 16)
             val credentials = Credentials.create(privateKeyBigInt.toString(16))
-            val signerAddress = credentials.address.lowercase()
+            val eoaSignerAddress = credentials.address.lowercase()
 
             // 2. 计算订单金额
             val amounts = calculateOrderAmounts(side, size, price)
@@ -197,6 +201,8 @@ class OrderSigningService {
 
             // 5. 确保 maker 地址也是小写格式
             val makerAddressLower = makerAddress.lowercase()
+            // POLY_1271 的 maker/signer 都必须是 Deposit Wallet；实际签名仍由 owner EOA 私钥完成。
+            val signerAddress = if (signatureType == 3) makerAddressLower else eoaSignerAddress
 
             logger.debug("========== 订单签名前参数 (V2) ==========")
             logger.debug("订单方向: $side, 价格: $price, 数量: $size")
@@ -293,24 +299,35 @@ class OrderSigningService {
                 builder = builder
             )
 
+            if (signatureType == 3) {
+                val innerDigest = com.wrbug.polymarketbot.util.Eip712Encoder.encodeDepositWalletOrderDigest(
+                    chainId = chainId,
+                    exchangeContract = exchangeContract.lowercase(),
+                    depositWallet = signer,
+                    contentsHash = orderHash
+                )
+                val innerSignature = signDigest(innerDigest, ecKeyPair)
+                return com.wrbug.polymarketbot.util.Eip712Encoder.wrapPoly1271OrderSignature(
+                    innerSignature = innerSignature,
+                    appDomainSeparator = domainSeparator,
+                    contentsHash = orderHash
+                )
+            }
+
             val structuredHash = com.wrbug.polymarketbot.util.Eip712Encoder.hashStructuredData(
                 domainSeparator = domainSeparator,
                 messageHash = orderHash
             )
-
-            val signature = org.web3j.crypto.Sign.signMessage(structuredHash, ecKeyPair, false)
-
-            val rHex = org.web3j.utils.Numeric.toHexString(signature.r).removePrefix("0x").padStart(64, '0')
-            val sHex = org.web3j.utils.Numeric.toHexString(signature.s).removePrefix("0x").padStart(64, '0')
-            val vBytes = signature.v
-            val vInt = if (vBytes.isNotEmpty()) vBytes[0].toInt() and 0xff else 0
-            val vHex = "%02x".format(vInt)
-
-            return "0x$rHex$sHex$vHex"
+            return org.web3j.utils.Numeric.toHexString(signDigest(structuredHash, ecKeyPair))
         } catch (e: Exception) {
             logger.error("订单签名失败 (V2)", e)
             throw RuntimeException("订单签名失败 (V2): ${e.message}", e)
         }
+    }
+
+    private fun signDigest(digest: ByteArray, ecKeyPair: org.web3j.crypto.ECKeyPair): ByteArray {
+        val signature = org.web3j.crypto.Sign.signMessage(digest, ecKeyPair, false)
+        return signature.r + signature.s + signature.v
     }
     
     /** 并发安全：确保同一毫秒内多次调用生成唯一 salt，避免 FIXED 模式预签双单等场景的 salt 碰撞 */
@@ -400,4 +417,3 @@ class OrderSigningService {
         return value.stripTrailingZeros().scale()
     }
 }
-

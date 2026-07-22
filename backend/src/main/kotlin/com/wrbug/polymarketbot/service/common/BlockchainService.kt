@@ -121,6 +121,11 @@ class BlockchainService(
                     logger.debug("使用 Magic Proxy 地址: $magicProxyAddress")
                     Result.success(magicProxyAddress)
                 }
+                WalletType.DEPOSIT -> {
+                    Result.failure(
+                        IllegalArgumentException("Deposit Wallet 地址不能由旧 Proxy/Safe 工厂计算，必须从 Polymarket Profile 获取")
+                    )
+                }
             }
         } catch (e: Exception) {
             logger.error("获取代理地址失败: ${e.message}", e)
@@ -1326,4 +1331,3 @@ class BlockchainService(
         }
     }
 }
-

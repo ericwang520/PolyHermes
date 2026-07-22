@@ -164,12 +164,12 @@ const AccountImportForm: React.FC<AccountImportFormProps> = ({
         if (options.length > 0) {
           setStep('select')
           // 如果有资产，默认选择第一个有资产的选项
-          const hasAssetsOption = options.find((opt: ProxyOption) => opt.hasAssets)
+          const hasAssetsOption = options.find((opt: ProxyOption) => opt.hasAssets && !opt.error && !!opt.proxyAddress)
           if (hasAssetsOption) {
             setSelectedProxyType(hasAssetsOption.walletType)
           } else {
-            // 否则选择第一个选项
-            setSelectedProxyType(options[0].walletType)
+            const firstAvailableOption = options.find((opt: ProxyOption) => !opt.error && !!opt.proxyAddress)
+            setSelectedProxyType(firstAvailableOption?.walletType || '')
           }
         } else {
           setStep('input')
@@ -490,15 +490,20 @@ const AccountImportForm: React.FC<AccountImportFormProps> = ({
               <Space direction="vertical" style={{ width: '100%' }} size={12}>
                 {proxyOptions.map((option) => {
                   const isSelected = selectedProxyType === option.walletType
-                  const typeLabel = option.walletType.toLowerCase() === 'magic' ? 'Magic' : 'Safe'
+                  const normalizedType = option.walletType.toLowerCase()
+                  const isDeposit = normalizedType === 'deposit'
+                  const isDisabled = !!option.error || !option.proxyAddress
+                  const typeLabel = isDeposit ? 'Deposit' : normalizedType === 'magic' ? 'Magic' : 'Safe'
+                  const tagColor = isDeposit ? 'gold' : normalizedType === 'magic' ? 'purple' : 'blue'
                   return (
                     <Card
                       key={option.walletType}
-                      hoverable
-                      onClick={() => setSelectedProxyType(option.walletType)}
+                      hoverable={!isDisabled}
+                      onClick={() => !isDisabled && setSelectedProxyType(option.walletType)}
                       size="small"
                       style={{
-                        cursor: 'pointer',
+                        cursor: isDisabled ? 'not-allowed' : 'pointer',
+                        opacity: isDisabled ? 0.65 : 1,
                         borderColor: isSelected ? 'var(--ant-color-primary)' : undefined,
                         borderWidth: isSelected ? 2 : 1,
                         backgroundColor: isSelected ? 'var(--ant-color-primary-bg)' : undefined,
@@ -507,8 +512,8 @@ const AccountImportForm: React.FC<AccountImportFormProps> = ({
                     >
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
                         <Space size="middle">
-                          <Radio checked={isSelected} />
-                          <Tag color={option.walletType.toLowerCase() === 'magic' ? 'purple' : 'blue'}>
+                          <Radio checked={isSelected} disabled={isDisabled} />
+                          <Tag color={tagColor}>
                             {typeLabel}
                           </Tag>
                           {option.hasAssets && (
@@ -539,7 +544,7 @@ const AccountImportForm: React.FC<AccountImportFormProps> = ({
                         )}
                       </div>
                       <div style={{ marginTop: 8, marginLeft: 28, fontSize: 12, color: 'var(--ant-color-text-secondary)', lineHeight: 1.5 }}>
-                        {t('accountImport.proxyOption.proxyAddressHelp')}
+                        {t(option.descriptionKey)}
                       </div>
                     </Card>
                   )

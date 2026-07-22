@@ -8,7 +8,7 @@ data class AccountImportRequest(
     val walletAddress: String,  // 钱包地址（前端从私钥推导，用于验证）
     val accountName: String? = null,
     val isEnabled: Boolean = true,  // 是否启用（用于订单推送等功能的开关）
-    val walletType: String = "magic"  // 钱包类型：magic（邮箱/OAuth登录）或 safe（MetaMask浏览器钱包）
+    val walletType: String = "magic"  // 钱包类型：magic、safe 或 deposit（POLY_1271）
 )
 
 /**
@@ -24,7 +24,7 @@ data class CheckProxyOptionsRequest(
  * 代理地址选项信息
  */
 data class ProxyOptionDto(
-    val walletType: String,  // "magic" 或 "safe"
+    val walletType: String,  // "magic"、"safe" 或 "deposit"
     val proxyAddress: String,  // 代理地址
     val descriptionKey: String,  // 说明文案的多语言 key（如 "accountImport.proxyOption.magic.description"）
     val availableBalance: String,  // 可用余额
@@ -104,7 +104,7 @@ data class AccountDto(
     val proxyAddress: String,  // Polymarket 代理钱包地址
     val accountName: String?,
     val isEnabled: Boolean,  // 是否启用（用于订单推送等功能的开关）
-    val walletType: String = "magic",  // 钱包类型：magic（邮箱/OAuth登录）或 safe（MetaMask浏览器钱包）
+    val walletType: String = "magic",  // 钱包类型：magic、safe 或 deposit（POLY_1271）
     val apiKeyConfigured: Boolean,  // API Key 是否已配置（不返回实际 Key）
     val apiSecretConfigured: Boolean,  // API Secret 是否已配置
     val apiPassphraseConfigured: Boolean,  // API Passphrase 是否已配置
@@ -325,4 +325,3 @@ data class RedeemablePositionInfo(
     val quantity: String,
     val value: String               // 价值（USDC，1:1）
 )
-

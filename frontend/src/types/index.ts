@@ -16,7 +16,7 @@ export interface Account {
   proxyAddress: string  // Polymarket 代理钱包地址
   accountName?: string
   isEnabled?: boolean  // 是否启用
-  walletType?: string  // 钱包类型：magic（邮箱/OAuth登录）或 safe（MetaMask浏览器钱包）
+  walletType?: string  // 钱包类型：magic、safe 或 deposit（POLY_1271）
   apiKeyConfigured: boolean
   apiSecretConfigured: boolean
   apiPassphraseConfigured: boolean
@@ -43,7 +43,7 @@ export interface AccountImportRequest {
   privateKey: string
   walletAddress: string
   accountName?: string
-  walletType?: string  // 钱包类型：magic（邮箱/OAuth登录）或 safe（MetaMask浏览器钱包）
+  walletType?: string  // 钱包类型：magic、safe 或 deposit（POLY_1271）
 }
 
 /**
@@ -59,7 +59,7 @@ export interface CheckProxyOptionsRequest {
  * 代理地址选项信息
  */
 export interface ProxyOption {
-  walletType: string  // "magic" 或 "safe"
+  walletType: string  // "magic"、"safe" 或 "deposit"
   proxyAddress: string  // 代理地址
   descriptionKey: string  // 说明文案的多语言 key
   availableBalance: string  // 可用余额

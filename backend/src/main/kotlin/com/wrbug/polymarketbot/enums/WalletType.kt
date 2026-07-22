@@ -14,7 +14,14 @@ enum class WalletType(val value: String, val description: String) {
      * Safe 钱包（MetaMask 等 Web3 钱包）
      * 使用 Gnosis Safe 代理合约，支持 Builder Relayer Gasless 或手动交易
      */
-    SAFE("safe", "Safe（Web3钱包）");
+    SAFE("safe", "Safe（Web3钱包）"),
+
+    /**
+     * Deposit Wallet（2026 年新版 Polymarket 钱包）
+     * CLOB V2 订单使用 POLY_1271 / signatureType=3。
+     */
+    DEPOSIT("deposit", "Deposit Wallet（POLY_1271）");
+
     
     companion object {
         /**
