@@ -81,6 +81,22 @@ open class CopyOrderTrackingService(
     companion object {
         private const val MAX_RETRY_ATTEMPTS = 2  // 最多重试次数（首次 + 1次重试）
         private const val RETRY_DELAY_MS = 3000L  // 重试前等待时间（毫秒，3秒）
+
+        /**
+         * Legacy Magic/Safe orders expose the owner EOA as order.signer.
+         * POLY_1271 Deposit Wallet orders expose the Deposit Wallet contract as
+         * order.signer while the owner EOA still signs the wrapped payload and
+         * authenticates CLOB requests.
+         */
+        internal fun isExpectedOrderSigner(
+            signatureType: Int,
+            orderSigner: String,
+            makerAddress: String,
+            walletAddress: String
+        ): Boolean {
+            val expectedSigner = if (signatureType == 3) makerAddress else walletAddress
+            return orderSigner.equals(expectedSigner, ignoreCase = true)
+        }
     }
 
     /**
@@ -1146,7 +1162,7 @@ open class CopyOrderTrackingService(
      * @param clobApi CLOB API 客户端
      * @param privateKey 私钥（用于签名）
      * @param makerAddress 代理钱包地址（funder）
-     * @param walletAddress 账户 EOA 地址（须与私钥推导的 signer 一致，用于校验及 POLY_ADDRESS）
+     * @param walletAddress 账户 owner EOA 地址（用于校验及 POLY_ADDRESS）
      * @param exchangeContract 签约用 exchange 合约（Neg Risk 市场需用 Neg Risk Exchange）
      * @param tokenId Token ID
      * @param side 订单方向（BUY/SELL）
@@ -1155,7 +1171,7 @@ open class CopyOrderTrackingService(
      * @param owner API Key（用于owner字段）
      * @param copyTradingId 跟单配置ID（用于日志）
      * @param tradeId Leader 交易ID（用于日志）
-     * @param signatureType 签名类型（1=Magic, 2=Safe）
+     * @param signatureType 签名类型（1=Magic, 2=Safe, 3=Deposit/POLY_1271）
      * @return 成功返回订单ID，失败返回异常
      */
     private suspend fun createOrderWithRetry(
@@ -1190,9 +1206,11 @@ open class CopyOrderTrackingService(
                     exchangeContract = exchangeContract
                 )
 
-                // 校验 signer 与账户 walletAddress 一致，否则服务端会返回 invalid signature（POLY_ADDRESS 与 order.signer 需一致）
-                if (signedOrder.signer.lowercase() != walletAddress.lowercase()) {
-                    val msg = "订单 signer 与账户 walletAddress 不一致，会导致 invalid signature。请确认该账户的私钥与 walletAddress 对应同一 EOA，且 API 密钥由该 EOA 创建。signer=${signedOrder.signer.take(10)}..., walletAddress=${walletAddress.take(10)}..."
+                // Magic/Safe 的 order.signer 是 owner EOA；POLY_1271 的 order.signer
+                // 必须是 Deposit Wallet 合约，owner EOA 只负责签 wrapper 和 CLOB 鉴权。
+                if (!isExpectedOrderSigner(signatureType, signedOrder.signer, makerAddress, walletAddress)) {
+                    val expectedSigner = if (signatureType == 3) makerAddress else walletAddress
+                    val msg = "订单 signer 与钱包类型不匹配，会导致 invalid signature。signatureType=$signatureType, signer=${signedOrder.signer.take(10)}..., expected=${expectedSigner.take(10)}..."
                     logger.error(msg)
                     return Result.failure(IllegalStateException(msg))
                 }
@@ -1629,4 +1647,3 @@ open class CopyOrderTrackingService(
         return "YES"  // 默认返回第一个 outcome
     }
 }
-
