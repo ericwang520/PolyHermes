@@ -11,6 +11,9 @@ import com.wrbug.polymarketbot.entity.CopyTrading
 import com.wrbug.polymarketbot.repository.CopySimulationPositionRepository
 import com.wrbug.polymarketbot.repository.CopySimulationSessionRepository
 import com.wrbug.polymarketbot.repository.CopySimulationTradeRepository
+import com.wrbug.polymarketbot.service.common.PolymarketClobService
+import com.wrbug.polymarketbot.service.copytrading.orders.CopyShareAccumulatorService
+import com.wrbug.polymarketbot.service.copytrading.orders.ShareAccumulationResult
 import com.wrbug.polymarketbot.service.system.TelegramNotificationService
 import com.wrbug.polymarketbot.util.toSafeBigDecimal
 import kotlinx.coroutines.CoroutineScope
@@ -34,13 +37,15 @@ class CopySimulationService(
     private val sessionRepository: CopySimulationSessionRepository,
     private val positionRepository: CopySimulationPositionRepository,
     private val tradeRepository: CopySimulationTradeRepository,
+    private val clobService: PolymarketClobService? = null,
+    private val shareAccumulatorService: CopyShareAccumulatorService? = null,
     private val telegramNotificationService: TelegramNotificationService? = null
 ) {
     private val logger = LoggerFactory.getLogger(CopySimulationService::class.java)
     private val notificationScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     @Transactional
-    fun process(copyTrading: CopyTrading, leaderTrade: TradeResponse): Result<Unit> {
+    suspend fun process(copyTrading: CopyTrading, leaderTrade: TradeResponse): Result<Unit> {
         if (copyTrading.executionMode != "PAPER") return Result.success(Unit)
         val configId = copyTrading.id
             ?: return Result.failure(IllegalArgumentException("模拟配置尚未保存"))
@@ -85,7 +90,7 @@ class CopySimulationService(
         }
     }
 
-    private fun simulateBuy(config: CopyTrading, session: CopySimulationSession, trade: TradeResponse) {
+    private suspend fun simulateBuy(config: CopyTrading, session: CopySimulationSession, trade: TradeResponse) {
         val outcomeIndex = trade.outcomeIndex
             ?: return record(session, config, trade, "BUY", "SKIPPED", "缺少 outcomeIndex")
         val price = trade.price.toSafeBigDecimal()
@@ -110,14 +115,63 @@ class CopySimulationService(
             else -> BigDecimal.ZERO
         }
         var notional = quantity.multiply(price)
-        if (notional > config.maxOrderSize) {
-            notional = config.maxOrderSize
-            quantity = notional.divide(price, 8, RoundingMode.DOWN)
-        }
         if (notional < config.minOrderSize) {
             return record(session, config, trade, "BUY", "FILTERED", "低于单笔最小金额", price, quantity, notional)
         }
+        val tokenId = trade.tokenId
+            ?: return record(session, config, trade, "BUY", "SKIPPED", "缺少 tokenId，无法读取市场最低 shares", price, quantity, notional)
+        val rules = clobService?.getMarketOrderRules(tokenId)?.getOrNull()
+            ?: return record(session, config, trade, "BUY", "SKIPPED", "无法读取市场 min_order_size", price, quantity, notional)
+        val accumulator = shareAccumulatorService
+            ?: return record(session, config, trade, "BUY", "SKIPPED", "零碎 shares 累积服务不可用", price, quantity, notional)
+        val accumulation = accumulator.accumulateAndTake(
+            copyTradingId = config.id!!,
+            marketId = trade.market,
+            outcomeIndex = outcomeIndex,
+            tokenId = tokenId,
+            side = "BUY",
+            followerQuantity = quantity,
+            leaderQuantity = trade.size.toSafeBigDecimal(),
+            minimumShares = rules.minimumShares,
+            maximumExecutableQuantity = config.maxOrderSize.divide(price, 8, RoundingMode.DOWN),
+            eventTime = parseEventTime(trade.timestamp)
+        )
+        val accumulatedLeaderQuantity: BigDecimal
+        when (accumulation) {
+            is ShareAccumulationResult.Ignored -> {
+                return record(
+                    session, config, trade, "BUY", "SKIPPED", "零碎买单没有可执行容量",
+                    price, quantity, notional
+                )
+            }
+            is ShareAccumulationResult.Netted -> {
+                return record(
+                    session, config, trade, "BUY", "NETTED",
+                    "零碎买卖互相抵消: ${accumulation.cancelledQuantity.stripTrailingZeros().toPlainString()} shares",
+                    price, quantity, notional
+                )
+            }
+            is ShareAccumulationResult.Pending -> {
+                return record(
+                    session, config, trade, "BUY", "PENDING",
+                    "零碎单累积中: ${accumulation.pendingQuantity.stripTrailingZeros().toPlainString()} / " +
+                        "${accumulation.minimumShares.stripTrailingZeros().toPlainString()} shares",
+                    price, quantity, notional
+                )
+            }
+            is ShareAccumulationResult.Ready -> {
+                quantity = accumulation.quantity
+                accumulatedLeaderQuantity = accumulation.leaderQuantity
+                notional = quantity.multiply(price)
+            }
+        }
+        val readyAccumulation = accumulation as ShareAccumulationResult.Ready
         if (notional > session.cashBalance) {
+            accumulator.restore(
+                config.id!!, trade.market, outcomeIndex, tokenId, "BUY",
+                readyAccumulation.quantity, readyAccumulation.leaderQuantity,
+                readyAccumulation.eventCount, parseEventTime(trade.timestamp)
+            )
             return record(session, config, trade, "BUY", "REJECTED", "模拟现金不足", price, quantity, notional)
         }
 
@@ -126,6 +180,11 @@ class CopySimulationService(
         )
         val existingValue = position?.quantity?.multiply(position.averageCost) ?: BigDecimal.ZERO
         if (config.maxPositionValue != null && existingValue.add(notional) > config.maxPositionValue) {
+            accumulator.restore(
+                config.id!!, trade.market, outcomeIndex, tokenId, "BUY",
+                readyAccumulation.quantity, readyAccumulation.leaderQuantity,
+                readyAccumulation.eventCount, parseEventTime(trade.timestamp)
+            )
             return record(session, config, trade, "BUY", "FILTERED", "达到最大仓位金额", price, quantity, notional)
         }
         val updatedPosition = position ?: CopySimulationPosition(
@@ -138,7 +197,7 @@ class CopySimulationService(
         val newQuantity = updatedPosition.quantity.add(quantity)
         updatedPosition.averageCost = existingValue.add(notional).divide(newQuantity, 8, RoundingMode.HALF_UP)
         updatedPosition.quantity = newQuantity
-        updatedPosition.leaderQuantity = updatedPosition.leaderQuantity.add(trade.size.toSafeBigDecimal())
+        updatedPosition.leaderQuantity = updatedPosition.leaderQuantity.add(accumulatedLeaderQuantity)
         updatedPosition.lastPrice = price
         updatedPosition.tokenId = trade.tokenId ?: updatedPosition.tokenId
         updatedPosition.valuationStatus = "LEADER_PRICE"
@@ -152,25 +211,79 @@ class CopySimulationService(
         record(session, config, trade, "BUY", "FILLED", null, price, quantity, notional)
     }
 
-    private fun simulateSell(config: CopyTrading, session: CopySimulationSession, trade: TradeResponse) {
+    private suspend fun simulateSell(config: CopyTrading, session: CopySimulationSession, trade: TradeResponse) {
         if (!config.supportSell) {
             return record(session, config, trade, "SELL", "SKIPPED", "配置未启用跟单卖出")
         }
         val outcomeIndex = trade.outcomeIndex
             ?: return record(session, config, trade, "SELL", "SKIPPED", "缺少 outcomeIndex")
         val price = trade.price.toSafeBigDecimal()
-        val position = positionRepository.findByCopyTradingIdAndMarketIdAndOutcomeIndex(
+        val existingPosition = positionRepository.findByCopyTradingIdAndMarketIdAndOutcomeIndex(
             config.id!!, trade.market, outcomeIndex
-        ) ?: return record(session, config, trade, "SELL", "SKIPPED", "没有可卖出的模拟持仓", price = price)
+        )
 
         val leaderSellQuantity = trade.size.toSafeBigDecimal()
-        val effectiveRatio = if (position.leaderQuantity > BigDecimal.ZERO) {
-            position.quantity.divide(position.leaderQuantity, 12, RoundingMode.DOWN)
+        val effectiveRatio = if (existingPosition != null && existingPosition.leaderQuantity > BigDecimal.ZERO) {
+            existingPosition.quantity.divide(existingPosition.leaderQuantity, 12, RoundingMode.DOWN)
         } else {
             config.copyRatio
         }
         val requested = leaderSellQuantity.multiply(effectiveRatio)
-        val quantity = minOf(position.quantity, requested)
+        val tokenId = trade.tokenId ?: existingPosition?.tokenId
+            ?: return record(session, config, trade, "SELL", "SKIPPED", "缺少 tokenId，无法读取市场最低 shares", price = price)
+        val rules = clobService?.getMarketOrderRules(tokenId)?.getOrNull()
+            ?: return record(session, config, trade, "SELL", "SKIPPED", "无法读取市场 min_order_size", price = price)
+        val accumulator = shareAccumulatorService
+            ?: return record(session, config, trade, "SELL", "SKIPPED", "零碎 shares 累积服务不可用", price = price)
+        val accumulation = accumulator.accumulateAndTake(
+            copyTradingId = config.id!!,
+            marketId = trade.market,
+            outcomeIndex = outcomeIndex,
+            tokenId = tokenId,
+            side = "SELL",
+            followerQuantity = requested,
+            leaderQuantity = leaderSellQuantity,
+            minimumShares = rules.minimumShares,
+            maximumExecutableQuantity = existingPosition?.quantity ?: BigDecimal.ZERO,
+            discardRemainderWhenNoCapacity = existingPosition == null,
+            eventTime = parseEventTime(trade.timestamp)
+        )
+        val quantity: BigDecimal
+        val accumulatedLeaderQuantity: BigDecimal
+        when (accumulation) {
+            is ShareAccumulationResult.Ignored -> {
+                val reason = if (accumulation.cancelledQuantity > BigDecimal.ZERO) {
+                    "已抵消 ${accumulation.cancelledQuantity.stripTrailingZeros().toPlainString()} shares；剩余卖出因无模拟持仓忽略"
+                } else {
+                    "没有可卖出的模拟持仓"
+                }
+                return record(
+                    session, config, trade, "SELL", "SKIPPED", reason,
+                    price, requested, requested.multiply(price)
+                )
+            }
+            is ShareAccumulationResult.Netted -> {
+                return record(
+                    session, config, trade, "SELL", "NETTED",
+                    "零碎买卖互相抵消: ${accumulation.cancelledQuantity.stripTrailingZeros().toPlainString()} shares",
+                    price, requested, requested.multiply(price)
+                )
+            }
+            is ShareAccumulationResult.Pending -> {
+                return record(
+                    session, config, trade, "SELL", "PENDING",
+                    "零碎单累积中: ${accumulation.pendingQuantity.stripTrailingZeros().toPlainString()} / " +
+                        "${accumulation.minimumShares.stripTrailingZeros().toPlainString()} shares",
+                    price, requested, requested.multiply(price)
+                )
+            }
+            is ShareAccumulationResult.Ready -> {
+                quantity = accumulation.quantity
+                accumulatedLeaderQuantity = accumulation.leaderQuantity
+            }
+        }
+        val position = existingPosition
+            ?: return record(session, config, trade, "SELL", "SKIPPED", "没有可卖出的模拟持仓", price = price)
         if (quantity <= BigDecimal.ZERO) {
             return record(session, config, trade, "SELL", "SKIPPED", "模拟持仓数量为 0", price = price)
         }
@@ -178,7 +291,7 @@ class CopySimulationService(
         val realized = price.subtract(position.averageCost).multiply(quantity)
         position.quantity = position.quantity.subtract(quantity)
         position.leaderQuantity = position.leaderQuantity
-            .subtract(minOf(position.leaderQuantity, leaderSellQuantity))
+            .subtract(minOf(position.leaderQuantity, accumulatedLeaderQuantity))
             .max(BigDecimal.ZERO)
         position.realizedPnl = position.realizedPnl.add(realized)
         position.lastPrice = price
@@ -485,6 +598,7 @@ class CopySimulationService(
     fun reset(copyTradingId: Long): CopySimulationSummaryDto? {
         val current = sessionRepository.findByCopyTradingId(copyTradingId) ?: return null
         val initialCash = current.initialCash
+        shareAccumulatorService?.clear(copyTradingId)
         tradeRepository.deleteByCopyTradingId(copyTradingId)
         positionRepository.deleteByCopyTradingId(copyTradingId)
         sessionRepository.deleteByCopyTradingId(copyTradingId)

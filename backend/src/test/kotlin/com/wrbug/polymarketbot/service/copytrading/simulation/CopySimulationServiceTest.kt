@@ -8,6 +8,11 @@ import com.wrbug.polymarketbot.entity.CopyTrading
 import com.wrbug.polymarketbot.repository.CopySimulationPositionRepository
 import com.wrbug.polymarketbot.repository.CopySimulationSessionRepository
 import com.wrbug.polymarketbot.repository.CopySimulationTradeRepository
+import com.wrbug.polymarketbot.service.common.MarketOrderRules
+import com.wrbug.polymarketbot.service.common.PolymarketClobService
+import com.wrbug.polymarketbot.service.copytrading.orders.CopyShareAccumulatorService
+import com.wrbug.polymarketbot.service.copytrading.orders.ShareAccumulationResult
+import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -23,10 +28,18 @@ class CopySimulationServiceTest {
     private val sessionRepository = mock(CopySimulationSessionRepository::class.java)
     private val positionRepository = mock(CopySimulationPositionRepository::class.java)
     private val tradeRepository = mock(CopySimulationTradeRepository::class.java)
-    private val service = CopySimulationService(sessionRepository, positionRepository, tradeRepository)
+    private val clobService = mock(PolymarketClobService::class.java)
+    private val accumulatorService = mock(CopyShareAccumulatorService::class.java)
+    private val service = CopySimulationService(
+        sessionRepository,
+        positionRepository,
+        tradeRepository,
+        clobService,
+        accumulatorService
+    )
 
     @Test
-    fun `paper fixed buy updates only simulated cash and position`() {
+    fun `paper fixed buy updates only simulated cash and position`() = runTest {
         var savedSession: CopySimulationSession? = null
         var savedPosition: CopySimulationPosition? = null
         var savedTrade: CopySimulationTrade? = null
@@ -61,6 +74,31 @@ class CopySimulationServiceTest {
         `when`(tradeRepository.save(any(CopySimulationTrade::class.java))).thenAnswer {
             it.getArgument<CopySimulationTrade>(0).also { trade -> savedTrade = trade }
         }
+        `when`(clobService.getMarketOrderRules("123")).thenReturn(
+            Result.success(MarketOrderRules(minimumShares = BigDecimal.ONE))
+        )
+        `when`(
+            accumulatorService.accumulateAndTake(
+                copyTradingId = 10,
+                marketId = "condition-1",
+                outcomeIndex = 0,
+                tokenId = "123",
+                side = "BUY",
+                followerQuantity = BigDecimal("4.00000000"),
+                leaderQuantity = BigDecimal("100"),
+                minimumShares = BigDecimal.ONE,
+                maximumExecutableQuantity = BigDecimal("10.00000000"),
+                eventTime = 1760000000000
+            )
+        ).thenReturn(
+            ShareAccumulationResult.Ready(
+                quantity = BigDecimal("4"),
+                leaderQuantity = BigDecimal("100"),
+                minimumShares = BigDecimal.ONE,
+                eventCount = 1,
+                remainingQuantity = BigDecimal.ZERO
+            )
+        )
 
         val result = service.process(
             copyTrading = CopyTrading(
@@ -97,7 +135,7 @@ class CopySimulationServiceTest {
     }
 
     @Test
-    fun `live mode never touches simulation ledger`() {
+    fun `live mode never touches simulation ledger`() = runTest {
         val result = service.process(
             CopyTrading(id = 11, accountId = 1, leaderId = 2, executionMode = "LIVE"),
             TradeResponse(
@@ -118,7 +156,7 @@ class CopySimulationServiceTest {
     }
 
     @Test
-    fun `paper ratio buy can fill below one USDC when minimum is one cent`() {
+    fun `paper ratio buy waits when calculated shares are below market minimum`() = runTest {
         var savedTrade: CopySimulationTrade? = null
 
         `when`(tradeRepository.existsByCopyTradingIdAndLeaderTradeIdAndAction(12, "trade-micro", "BUY"))
@@ -155,6 +193,29 @@ class CopySimulationServiceTest {
         `when`(tradeRepository.save(any(CopySimulationTrade::class.java))).thenAnswer {
             it.getArgument<CopySimulationTrade>(0).also { trade -> savedTrade = trade }
         }
+        `when`(clobService.getMarketOrderRules("456")).thenReturn(
+            Result.success(MarketOrderRules(minimumShares = BigDecimal("5")))
+        )
+        `when`(
+            accumulatorService.accumulateAndTake(
+                copyTradingId = 12,
+                marketId = "condition-micro",
+                outcomeIndex = 0,
+                tokenId = "456",
+                side = "BUY",
+                followerQuantity = BigDecimal("0.62"),
+                leaderQuantity = BigDecimal("62"),
+                minimumShares = BigDecimal("5"),
+                maximumExecutableQuantity = BigDecimal("10.00000000"),
+                eventTime = 1760000000000
+            )
+        ).thenReturn(
+            ShareAccumulationResult.Pending(
+                pendingQuantity = BigDecimal("0.62"),
+                minimumShares = BigDecimal("5"),
+                eventCount = 1
+            )
+        )
 
         val result = service.process(
             copyTrading = CopyTrading(
@@ -181,7 +242,7 @@ class CopySimulationServiceTest {
         )
 
         assertTrue(result.isSuccess)
-        assertEquals("FILLED", savedTrade!!.status)
+        assertEquals("PENDING", savedTrade!!.status)
         assertEquals(0, savedTrade!!.notional.compareTo(BigDecimal("0.31")))
     }
 

@@ -27,7 +27,7 @@ const EditModal: React.FC<EditModalProps> = ({
   const [fetching, setFetching] = useState(true)
   const [copyTrading, setCopyTrading] = useState<CopyTrading | null>(null)
   const [copyMode, setCopyMode] = useState<'RATIO' | 'FIXED'>('RATIO')
-  const minimumOrderAmount = copyTrading?.executionMode === 'PAPER' ? 0.01 : 1
+  const minimumOrderAmount = 0.01
     const [originalEnabled, setOriginalEnabled] = useState<boolean>(true)
     const [keywords, setKeywords] = useState<string[]>([])
     const keywordInputRef = useRef<InputRef>(null)
@@ -553,7 +553,7 @@ const EditModal: React.FC<EditModalProps> = ({
               <Form.Item
                 label={t('copyTradingEdit.minOrderSize') || '单笔订单最小金额 ($)'}
                 name="minOrderSize"
-                tooltip={`比例模式的單筆最低金額；${copyTrading?.executionMode === 'PAPER' ? '模擬模式可低至 0.01' : '實盤模式最低 1'}`}
+                tooltip="比例模式的單筆金額過濾門檻，模擬與實盤皆可低至 0.01。低於市場 min_order_size 的 shares 會持久化累積，達到交易所門檻才執行。"
                 rules={[
                   { 
                     validator: (_, value) => {

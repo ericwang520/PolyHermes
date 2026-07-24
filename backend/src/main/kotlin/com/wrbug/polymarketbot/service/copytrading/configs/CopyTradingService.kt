@@ -647,12 +647,10 @@ class CopyTradingService(
         }
     }
 
-    private fun minimumOrderAmount(executionMode: String): BigDecimal =
-        if (executionMode == CopyExecutionMode.PAPER.name) {
-            BigDecimal("0.01")
-        } else {
-            BigDecimal.ONE
-        }
+    private fun minimumOrderAmount(executionMode: String): BigDecimal {
+        require(executionMode == CopyExecutionMode.PAPER.name || executionMode == CopyExecutionMode.LIVE.name)
+        return BigDecimal("0.01")
+    }
 
     private fun validateOrderAmounts(
         executionMode: String,
@@ -662,19 +660,11 @@ class CopyTradingService(
     ) {
         val minimum = minimumOrderAmount(executionMode)
         require(minOrderSize >= minimum) {
-            if (executionMode == CopyExecutionMode.PAPER.name) {
-                "模擬模式單筆最小金額必須 >= 0.01"
-            } else {
-                "實盤模式單筆最小金額必須 >= 1"
-            }
+            "單筆最小金額必須 >= 0.01"
         }
         if (copyMode == "FIXED") {
             require(fixedAmount != null && fixedAmount >= minimum) {
-                if (executionMode == CopyExecutionMode.PAPER.name) {
-                    "模擬模式固定金額必須 >= 0.01"
-                } else {
-                    "實盤模式固定金額必須 >= 1"
-                }
+                "固定金額必須 >= 0.01"
             }
         }
     }

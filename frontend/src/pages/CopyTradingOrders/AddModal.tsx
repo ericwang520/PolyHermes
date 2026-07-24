@@ -45,7 +45,7 @@ const AddModal: React.FC<AddModalProps> = ({
   const { accounts, fetchAccounts } = useAccountStore()
   const [form] = Form.useForm()
   const executionMode = Form.useWatch('executionMode', form) || 'PAPER'
-  const minimumOrderAmount = executionMode === 'PAPER' ? 0.01 : 1
+  const minimumOrderAmount = 0.01
   const selectedAccountId = Form.useWatch('accountId', form)
   const [loading, setLoading] = useState(false)
   const [leaders, setLeaders] = useState<Leader[]>([])
@@ -389,7 +389,7 @@ const AddModal: React.FC<AddModalProps> = ({
   }
   
   const handleSubmit = async (values: any) => {
-    const minimum = values.executionMode === 'PAPER' ? 0.01 : 1
+    const minimum = 0.01
     // 前端校验
     if (values.copyMode === 'FIXED') {
       if (!values.fixedAmount || Number(values.fixedAmount) < minimum) {
@@ -528,13 +528,9 @@ const AddModal: React.FC<AddModalProps> = ({
           >
             <Radio.Group
               buttonStyle="solid"
-              onChange={(event) => {
-                const mode = event.target.value
+              onChange={() => {
                 form.setFieldValue('accountId', undefined)
-                form.setFieldValue('minOrderSize', mode === 'PAPER' ? 0.01 : 1)
-                if (mode === 'LIVE' && Number(form.getFieldValue('fixedAmount') || 0) < 1) {
-                  form.setFieldValue('fixedAmount', 1)
-                }
+                form.setFieldValue('minOrderSize', 0.01)
               }}
             >
               <Radio.Button value="PAPER">模擬跟單（推薦）</Radio.Button>
@@ -845,7 +841,7 @@ const AddModal: React.FC<AddModalProps> = ({
               <Form.Item
                 label={t('copyTradingAdd.minOrderSize') || '单笔订单最小金额 ($)'}
                 name="minOrderSize"
-                tooltip={`比例模式的單筆最低金額；${executionMode === 'PAPER' ? '模擬模式可低至 0.01' : '實盤模式最低 1'}`}
+                tooltip="比例模式的單筆金額過濾門檻，模擬與實盤皆可低至 0.01。低於市場 min_order_size 的 shares 會持久化累積，達到交易所門檻才執行。"
                 rules={[
                   { 
                     validator: (_, value) => {

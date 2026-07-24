@@ -253,7 +253,13 @@ data class CancelOrdersBatchRequest(
 
 data class OrderbookResponse(
     val bids: List<OrderbookEntry>,
-    val asks: List<OrderbookEntry>
+    val asks: List<OrderbookEntry>,
+    @SerializedName("min_order_size")
+    val minOrderSize: String? = null,
+    @SerializedName("tick_size")
+    val tickSize: String? = null,
+    @SerializedName("neg_risk")
+    val negRisk: Boolean? = null
 )
 
 data class OrderbookEntry(

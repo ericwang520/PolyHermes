@@ -1,11 +1,13 @@
 package com.wrbug.polymarketbot.service.common
 
+import com.github.benmanes.caffeine.cache.Caffeine
 import com.wrbug.polymarketbot.api.*
 import com.wrbug.polymarketbot.util.RetrofitFactory
 import com.wrbug.polymarketbot.util.toSafeBigDecimal
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.math.BigDecimal
+import java.time.Duration
 
 /**
  * Polymarket CLOB API 服务封装
@@ -18,6 +20,10 @@ class PolymarketClobService(
 ) {
     
     private val logger = LoggerFactory.getLogger(PolymarketClobService::class.java)
+    private val marketRulesCache = Caffeine.newBuilder()
+        .maximumSize(20_000)
+        .expireAfterWrite(Duration.ofMinutes(2))
+        .build<String, MarketOrderRules>()
     
     /**
      * 获取订单簿
@@ -45,7 +51,9 @@ class PolymarketClobService(
         return try {
             val response = clobApi.getOrderbook(tokenId = tokenId, market = null)
             if (response.isSuccessful && response.body() != null) {
-                Result.success(response.body()!!)
+                val orderbook = response.body()!!
+                cacheMarketRules(tokenId, orderbook)
+                Result.success(orderbook)
             } else {
                 Result.failure(Exception("获取订单簿失败: ${response.code()} ${response.message()}"))
             }
@@ -53,6 +61,43 @@ class PolymarketClobService(
             logger.error("获取订单簿异常: ${e.message}", e)
             Result.failure(e)
         }
+    }
+
+    /**
+     * 市场最小 shares / tick size 很少变化，短 TTL 缓存可避免 PAPER
+     * 高频跟单为每笔交易额外请求一次 /book。若调用方已经取得订单簿，
+     * 会直接使用该响应并刷新缓存。
+     */
+    suspend fun getMarketOrderRules(
+        tokenId: String,
+        orderbook: OrderbookResponse? = null
+    ): Result<MarketOrderRules> {
+        rulesFromOrderbook(orderbook)?.let {
+            marketRulesCache.put(tokenId, it)
+            return Result.success(it)
+        }
+        marketRulesCache.getIfPresent(tokenId)?.let { return Result.success(it) }
+        val fetched = getOrderbookByTokenId(tokenId)
+        if (fetched.isFailure) {
+            return Result.failure(fetched.exceptionOrNull() ?: IllegalStateException("无法获取市场规则"))
+        }
+        return rulesFromOrderbook(fetched.getOrNull())
+            ?.let { Result.success(it) }
+            ?: Result.failure(IllegalStateException("订单簿缺少 min_order_size: tokenId=$tokenId"))
+    }
+
+    internal fun cacheMarketRules(tokenId: String, orderbook: OrderbookResponse) {
+        rulesFromOrderbook(orderbook)?.let { marketRulesCache.put(tokenId, it) }
+    }
+
+    private fun rulesFromOrderbook(orderbook: OrderbookResponse?): MarketOrderRules? {
+        val minimumShares = orderbook?.minOrderSize?.toSafeBigDecimal() ?: return null
+        if (minimumShares <= BigDecimal.ZERO) return null
+        return MarketOrderRules(
+            minimumShares = minimumShares,
+            tickSize = orderbook.tickSize?.toSafeBigDecimal(),
+            negRisk = orderbook.negRisk
+        )
     }
     
     /**
@@ -426,4 +471,3 @@ class PolymarketClobService(
         }
     }
 }
-

@@ -19,6 +19,8 @@ import java.util.concurrent.ConcurrentHashMap
 import com.wrbug.polymarketbot.service.copytrading.configs.CopyTradingFilterService
 import com.wrbug.polymarketbot.service.copytrading.configs.FilterStatus
 import com.wrbug.polymarketbot.service.copytrading.orders.OrderSigningService
+import com.wrbug.polymarketbot.service.copytrading.orders.CopyShareAccumulatorService
+import com.wrbug.polymarketbot.service.copytrading.orders.ShareAccumulationResult
 import com.wrbug.polymarketbot.service.copytrading.simulation.CopySimulationService
 import com.wrbug.polymarketbot.service.common.BlockchainService
 import com.wrbug.polymarketbot.service.common.MarketService
@@ -49,6 +51,7 @@ open class CopyOrderTrackingService(
     private val filterService: CopyTradingFilterService,
     private val leaderRepository: LeaderRepository,
     private val orderSigningService: OrderSigningService,
+    private val shareAccumulatorService: CopyShareAccumulatorService,
     private val blockchainService: BlockchainService,
     private val clobService: PolymarketClobService,
     private val retrofitFactory: RetrofitFactory,
@@ -453,59 +456,17 @@ open class CopyOrderTrackingService(
                         continue
                     }
 
-                    if (buyQuantity.lt(BigDecimal.ONE)) {
-                        logger.warn("计算得到的买入数量小于1，自动调整为1 (Polymarket 最小下单数量): copyTradingId=${copyTrading.id}, tradeId=${trade.id}, originalQuantity=$buyQuantity")
-                        buyQuantity = BigDecimal.ONE
-                    }
                     // 验证订单数量限制（仅比例模式）
                     var finalBuyQuantity = buyQuantity
                     if (copyTrading.copyMode == "RATIO") {
                         val tradePrice = trade.price.toSafeBigDecimal()
                         val rawOrderAmount = buyQuantity.multi(tradePrice)
-
-                        // 对按比例计算的金额进行向上取整处理（确保满足最小限制）
-                        // 向上取整到 2 位小数（USDC 精度）
-                        val roundedOrderAmount = rawOrderAmount.setScale(2, java.math.RoundingMode.CEILING)
-
-                        // 如果原始金额或向上取整后的金额小于最小限制，调整 buyQuantity 以满足最小限制
-                        // 这样可以避免精度问题导致订单被错误地跳过
-                        if (roundedOrderAmount.lt(copyTrading.minOrderSize)) {
-                            logger.debug("订单金额（向上取整后）低于最小限制，调整数量以满足最小限制: copyTradingId=${copyTrading.id}, rawAmount=$rawOrderAmount, roundedAmount=$roundedOrderAmount, min=${copyTrading.minOrderSize}")
-                            // 计算满足最小限制所需的数量（向上取整）
-                            val minQuantity =
-                                copyTrading.minOrderSize.div(tradePrice, 8, java.math.RoundingMode.CEILING)
-                            if (minQuantity.lte(BigDecimal.ZERO)) {
-                                logger.warn("计算出的最小数量为0或负数，跳过: copyTradingId=${copyTrading.id}")
-                                continue
-                            }
-                            // 使用调整后的数量
-                            finalBuyQuantity = minQuantity
-                            logger.debug(
-                                "已调整数量以满足最小限制: copyTradingId=${copyTrading.id}, originalQuantity=$buyQuantity, adjustedQuantity=$finalBuyQuantity, adjustedAmount=${
-                                    finalBuyQuantity.multi(
-                                        tradePrice
-                                    )
-                                }"
+                        if (rawOrderAmount.lt(copyTrading.minOrderSize)) {
+                            logger.info(
+                                "订单金额低于配置门槛，跳过且不向上放大: copyTradingId=${copyTrading.id}, " +
+                                    "amount=$rawOrderAmount, min=${copyTrading.minOrderSize}"
                             )
-                        } else if (rawOrderAmount.lt(copyTrading.minOrderSize)) {
-                            // 原始金额小于最小限制，但向上取整后满足，调整数量以满足最小限制
-                            logger.debug("订单金额（精度处理后）低于最小限制，调整数量以满足最小限制: copyTradingId=${copyTrading.id}, rawAmount=$rawOrderAmount, min=${copyTrading.minOrderSize}")
-                            // 计算满足最小限制所需的数量（向上取整）
-                            val minQuantity =
-                                copyTrading.minOrderSize.div(tradePrice, 8, java.math.RoundingMode.CEILING)
-                            if (minQuantity.lte(BigDecimal.ZERO)) {
-                                logger.warn("计算出的最小数量为0或负数，跳过: copyTradingId=${copyTrading.id}")
-                                continue
-                            }
-                            // 使用调整后的数量
-                            finalBuyQuantity = minQuantity
-                            logger.debug(
-                                "已调整数量以满足最小限制: copyTradingId=${copyTrading.id}, originalQuantity=$buyQuantity, adjustedQuantity=$finalBuyQuantity, adjustedAmount=${
-                                    finalBuyQuantity.multi(
-                                        tradePrice
-                                    )
-                                }"
-                            )
+                            continue
                         }
 
                         // 检查最大限制（使用调整后的数量）
@@ -569,17 +530,85 @@ open class CopyOrderTrackingService(
                         }
                     }
 
+                    val marketRulesResult = clobService.getMarketOrderRules(tokenId, orderbookForCheck)
+                    if (marketRulesResult.isFailure) {
+                        logger.warn(
+                            "无法读取市场最低 shares，安全跳过: copyTradingId=${copyTrading.id}, " +
+                                "tokenId=$tokenId, error=${marketRulesResult.exceptionOrNull()?.message}"
+                        )
+                        continue
+                    }
+                    val marketRules = marketRulesResult.getOrThrow()
+                    val accumulation = shareAccumulatorService.accumulateAndTake(
+                        copyTradingId = copyTrading.id!!,
+                        marketId = effectiveMarketId,
+                        outcomeIndex = effectiveOutcomeIndex,
+                        tokenId = tokenId,
+                        side = "BUY",
+                        followerQuantity = finalBuyQuantity,
+                        leaderQuantity = trade.size.toSafeBigDecimal(),
+                        minimumShares = marketRules.minimumShares,
+                        maximumExecutableQuantity = copyTrading.maxOrderSize
+                            .divide(buyPrice, 8, java.math.RoundingMode.DOWN),
+                        eventTime = trade.timestamp.toLongOrNull()?.let {
+                            if (it < 10_000_000_000L) it * 1000 else it
+                        } ?: System.currentTimeMillis()
+                    )
+                    var accumulatedLeaderQuantity = trade.size.toSafeBigDecimal()
+                    when (accumulation) {
+                        is ShareAccumulationResult.Ignored -> {
+                            logger.info(
+                                "零碎买单没有可执行容量: copyTradingId=${copyTrading.id}, tokenId=$tokenId, " +
+                                    "discarded=${accumulation.discardedQuantity}"
+                            )
+                            continue
+                        }
+                        is ShareAccumulationResult.Netted -> {
+                            logger.info(
+                                "零碎买卖已抵消: copyTradingId=${copyTrading.id}, tokenId=$tokenId, " +
+                                    "cancelled=${accumulation.cancelledQuantity}, opposite=${accumulation.oppositeSide}"
+                            )
+                            continue
+                        }
+                        is ShareAccumulationResult.Pending -> {
+                            logger.info(
+                                "零碎买单累积中: copyTradingId=${copyTrading.id}, tokenId=$tokenId, " +
+                                    "pending=${accumulation.pendingQuantity}, min=${accumulation.minimumShares}"
+                            )
+                            continue
+                        }
+                        is ShareAccumulationResult.Ready -> {
+                            finalBuyQuantity = accumulation.quantity
+                            accumulatedLeaderQuantity = accumulation.leaderQuantity
+                        }
+                    }
+                    val readyAccumulation = accumulation as ShareAccumulationResult.Ready
+                    val restoreBuyAccumulation: suspend () -> Unit = {
+                        shareAccumulatorService.restore(
+                            copyTradingId = copyTrading.id!!,
+                            marketId = effectiveMarketId,
+                            outcomeIndex = effectiveOutcomeIndex,
+                            tokenId = tokenId,
+                            side = "BUY",
+                            followerQuantity = readyAccumulation.quantity,
+                            leaderQuantity = readyAccumulation.leaderQuantity,
+                            eventCount = readyAccumulation.eventCount
+                        )
+                    }
+
                     // 解密 API 凭证
                     val apiSecret = try {
                         decryptApiSecret(account)
                     } catch (e: Exception) {
                         logger.warn("解密 API 凭证失败，跳过创建订单: accountId=${account.id}, error=${e.message}")
+                        restoreBuyAccumulation()
                         continue
                     }
                     val apiPassphrase = try {
                         decryptApiPassphrase(account)
                     } catch (e: Exception) {
                         logger.warn("解密 API 凭证失败，跳过创建订单: accountId=${account.id}, error=${e.message}")
+                        restoreBuyAccumulation()
                         continue
                     }
 
@@ -592,7 +621,12 @@ open class CopyOrderTrackingService(
                     )
 
                     // 解密私钥
-                    val decryptedPrivateKey = decryptPrivateKey(account)
+                    val decryptedPrivateKey = try {
+                        decryptPrivateKey(account)
+                    } catch (e: Exception) {
+                        restoreBuyAccumulation()
+                        continue
+                    }
 
                     logger.info("准备创建买入订单: copyTradingId=${copyTrading.id}, tradeId=${trade.id}, leaderPrice=${trade.price}, tolerance=${copyTrading.priceTolerance}, calculatedPrice=$buyPrice, quantity=$finalBuyQuantity")
 
@@ -661,6 +695,7 @@ open class CopyOrderTrackingService(
                             }
                         }
 
+                        restoreBuyAccumulation()
                         continue
                     }
 
@@ -669,6 +704,7 @@ open class CopyOrderTrackingService(
                     // 验证 orderId 格式（必须以 0x 开头的 16 进制）
                     if (!isValidOrderId(realOrderId)) {
                         logger.warn("买入订单ID格式无效，跳过保存: orderId=$realOrderId")
+                        restoreBuyAccumulation()
                         continue
                     }
 
@@ -683,7 +719,7 @@ open class CopyOrderTrackingService(
                         outcomeIndex = effectiveOutcomeIndex,  // 新增字段
                         buyOrderId = realOrderId,  // 使用真实订单ID
                         leaderBuyTradeId = trade.id,
-                        leaderBuyQuantity = trade.size.toSafeBigDecimal(),  // 存储 Leader 买入数量（用于固定金额模式计算卖出比例）
+                        leaderBuyQuantity = accumulatedLeaderQuantity,
                         quantity = finalBuyQuantity,  // 使用最终数量（可能已调整），临时值
                         price = buyPrice,  // 使用下单价格，临时值
                         remainingQuantity = finalBuyQuantity,
@@ -948,13 +984,13 @@ open class CopyOrderTrackingService(
             leaderSellTrade.outcomeIndex
         )
 
-        if (unmatchedOrders.isEmpty()) {
-            return
-        }
-
         // 3. 计算需要匹配的数量
         // 对于 FIXED 模式，需要根据实际买入比例计算；对于 RATIO 模式，使用配置的 copyRatio
-        val needMatch = when (copyTrading.copyMode) {
+        val needMatch = if (unmatchedOrders.isEmpty()) {
+            // 没有已成交持仓时，仍让 SELL 抵消尚未达到市场门槛的 BUY dust。
+            // 未能抵消的卖出余量不会保存为未来空头意图。
+            leaderSellTrade.size.toSafeBigDecimal().multi(copyTrading.copyRatio)
+        } else when (copyTrading.copyMode) {
             "FIXED" -> {
                 // 固定金额模式：根据未匹配订单的实际比例计算
                 // 需要查询每个订单对应的 Leader 买入交易，计算实际比例
@@ -976,13 +1012,7 @@ open class CopyOrderTrackingService(
             }
         }
 
-        // 如果需要卖出的数量小于1（但大于0），自动调整为1（Polymarket 最小下单数量）
-        // 注意：如果实际持有数量不足1，后续的 totalMatched 检查会拦截
         var finalNeedMatch = needMatch
-        if (finalNeedMatch.gt(BigDecimal.ZERO) && finalNeedMatch.lt(BigDecimal.ONE)) {
-            logger.warn("计算得到的卖出数量小于1，自动调整为1: copyTradingId=${copyTrading.id}, original=$needMatch")
-            finalNeedMatch = BigDecimal.ONE
-        }
 
         // 4. 获取 tokenId：优先使用链上解析得到的 tokenId，否则用 conditionId+outcomeIndex 链上重算
         val tokenId = if (!leaderSellTrade.tokenId.isNullOrBlank()) {
@@ -1003,14 +1033,78 @@ open class CopyOrderTrackingService(
         // 5. 计算卖出价格（优先使用订单簿 bestBid，失败则使用 Leader 价格，固定按90%计算）
         // 注意：需要先计算卖出价格，因为后续创建 matchDetails 需要使用实际卖出价格
         val leaderPrice = leaderSellTrade.price.toSafeBigDecimal()
-        val sellPrice = runCatching {
-            clobService.getOrderbookByTokenId(tokenId)
-                .getOrNull()
-                ?.let { calculateMarketSellPrice(it) }
-        }
+        val sellOrderbook = clobService.getOrderbookByTokenId(tokenId).getOrNull()
+        val sellPrice = runCatching { sellOrderbook?.let { calculateMarketSellPrice(it) } }
             .onFailure { e -> logger.warn("获取订单簿或计算 bestBid 失败，使用 Leader 价格: tokenId=$tokenId, error=${e.message}") }
             .getOrNull()
             ?: calculateFallbackSellPrice(leaderPrice)
+
+        val sellRulesResult = clobService.getMarketOrderRules(tokenId, sellOrderbook)
+        if (sellRulesResult.isFailure) {
+            logger.warn(
+                "无法读取卖出市场最低 shares，安全跳过: copyTradingId=${copyTrading.id}, " +
+                    "tokenId=$tokenId, error=${sellRulesResult.exceptionOrNull()?.message}"
+            )
+            return
+        }
+        val sellRules = sellRulesResult.getOrThrow()
+        val availableQuantity = unmatchedOrders.fold(BigDecimal.ZERO) { total, order ->
+            total.add(order.remainingQuantity.toSafeBigDecimal())
+        }
+        val sellAccumulation = shareAccumulatorService.accumulateAndTake(
+            copyTradingId = copyTrading.id!!,
+            marketId = leaderSellTrade.market,
+            outcomeIndex = leaderSellTrade.outcomeIndex,
+            tokenId = tokenId,
+            side = "SELL",
+            followerQuantity = finalNeedMatch,
+            leaderQuantity = leaderSellTrade.size.toSafeBigDecimal(),
+            minimumShares = sellRules.minimumShares,
+            maximumExecutableQuantity = availableQuantity,
+            discardRemainderWhenNoCapacity = unmatchedOrders.isEmpty(),
+            eventTime = leaderSellTrade.timestamp.toLongOrNull()?.let {
+                if (it < 10_000_000_000L) it * 1000 else it
+            } ?: System.currentTimeMillis()
+        )
+        when (sellAccumulation) {
+            is ShareAccumulationResult.Ignored -> {
+                logger.info(
+                    "卖出信号无可用持仓，已忽略剩余零碎量: copyTradingId=${copyTrading.id}, tokenId=$tokenId, " +
+                        "cancelled=${sellAccumulation.cancelledQuantity}, discarded=${sellAccumulation.discardedQuantity}"
+                )
+                return
+            }
+            is ShareAccumulationResult.Netted -> {
+                logger.info(
+                    "零碎买卖已抵消: copyTradingId=${copyTrading.id}, tokenId=$tokenId, " +
+                        "cancelled=${sellAccumulation.cancelledQuantity}, opposite=${sellAccumulation.oppositeSide}"
+                )
+                return
+            }
+            is ShareAccumulationResult.Pending -> {
+                logger.info(
+                    "零碎卖单累积中: copyTradingId=${copyTrading.id}, tokenId=$tokenId, " +
+                        "pending=${sellAccumulation.pendingQuantity}, min=${sellAccumulation.minimumShares}"
+                )
+                return
+            }
+            is ShareAccumulationResult.Ready -> {
+                finalNeedMatch = sellAccumulation.quantity
+            }
+        }
+        val readySellAccumulation = sellAccumulation as ShareAccumulationResult.Ready
+        val restoreSellAccumulation: suspend () -> Unit = {
+            shareAccumulatorService.restore(
+                copyTradingId = copyTrading.id!!,
+                marketId = leaderSellTrade.market,
+                outcomeIndex = leaderSellTrade.outcomeIndex,
+                tokenId = tokenId,
+                side = "SELL",
+                followerQuantity = readySellAccumulation.quantity,
+                leaderQuantity = readySellAccumulation.leaderQuantity,
+                eventCount = readySellAccumulation.eventCount
+            )
+        }
 
         // 6. 按FIFO顺序匹配，计算实际可以卖出的数量
         // 使用计算出的实际卖出价格（而不是 Leader 价格）来创建匹配明细
@@ -1049,11 +1143,16 @@ open class CopyOrderTrackingService(
         }
 
         if (totalMatched.lte(BigDecimal.ZERO)) {
+            restoreSellAccumulation()
             return
         }
 
-        if (totalMatched.lt(BigDecimal.ONE)) {
-            logger.warn("卖出数量小于1，跳过卖出 (Polymarket 最小下单数量为 1): copyTradingId=${copyTrading.id}, tradeId=${leaderSellTrade.id}, quantity=$totalMatched")
+        if (totalMatched.lt(sellRules.minimumShares)) {
+            logger.warn(
+                "卖出数量低于市场最低 shares，跳过: copyTradingId=${copyTrading.id}, " +
+                    "tradeId=${leaderSellTrade.id}, quantity=$totalMatched, min=${sellRules.minimumShares}"
+            )
+            restoreSellAccumulation()
             return
         }
 
@@ -1072,7 +1171,12 @@ open class CopyOrderTrackingService(
         }
 
         // 8. 解密私钥（在方法开始时解密一次，后续复用）
-        val decryptedPrivateKey = decryptPrivateKey(account)
+        val decryptedPrivateKey = try {
+            decryptPrivateKey(account)
+        } catch (e: Exception) {
+            restoreSellAccumulation()
+            return
+        }
 
         // 9. Neg Risk 市场需用 Neg Risk Exchange 签约
         val negRiskSell = marketService.getNegRiskByConditionId(leaderSellTrade.market) == true
@@ -1093,6 +1197,7 @@ open class CopyOrderTrackingService(
             )
         } catch (e: Exception) {
             logger.error("创建并签名卖出订单失败: copyTradingId=${copyTrading.id}, tradeId=${leaderSellTrade.id}", e)
+            restoreSellAccumulation()
             return
         }
 
@@ -1134,10 +1239,14 @@ open class CopyOrderTrackingService(
             // 创建订单失败，记录错误日志
             val exception = createOrderResult.exceptionOrNull()
             logger.error("创建卖出订单失败: copyTradingId=${copyTrading.id}, tradeId=${leaderSellTrade.id}, error=${exception?.message}")
+            restoreSellAccumulation()
             return
         }
 
-        val realSellOrderId = createOrderResult.getOrNull() ?: return
+        val realSellOrderId = createOrderResult.getOrNull() ?: run {
+            restoreSellAccumulation()
+            return
+        }
 
         // 12. 下单时直接使用下单价格保存，等待定时任务更新实际成交价
         // priceUpdated 统一由定时任务更新，下单时统一设置为 false（非0x开头的除外）
