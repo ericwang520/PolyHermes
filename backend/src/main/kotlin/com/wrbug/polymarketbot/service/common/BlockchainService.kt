@@ -126,6 +126,9 @@ class BlockchainService(
                         IllegalArgumentException("Deposit Wallet 地址不能由旧 Proxy/Safe 工厂计算，必须从 Polymarket Profile 获取")
                     )
                 }
+                WalletType.SIMULATED -> {
+                    Result.failure(IllegalArgumentException("模擬錢包沒有鏈上代理地址"))
+                }
             }
         } catch (e: Exception) {
             logger.error("获取代理地址失败: ${e.message}", e)

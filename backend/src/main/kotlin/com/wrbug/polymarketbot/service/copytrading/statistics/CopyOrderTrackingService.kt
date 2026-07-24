@@ -4,6 +4,7 @@ import com.wrbug.polymarketbot.api.NewOrderRequest
 import com.wrbug.polymarketbot.api.PolymarketClobApi
 import com.wrbug.polymarketbot.api.TradeResponse
 import com.wrbug.polymarketbot.entity.*
+import com.wrbug.polymarketbot.enums.WalletType
 import com.wrbug.polymarketbot.repository.*
 import com.wrbug.polymarketbot.util.RetrofitFactory
 import com.wrbug.polymarketbot.util.*
@@ -273,6 +274,10 @@ open class CopyOrderTrackingService(
                     // 获取账户
                     val account = accountRepository.findById(copyTrading.accountId).orElse(null)
                         ?: continue
+                    if (WalletType.fromStringOrDefault(account.walletType) == WalletType.SIMULATED) {
+                        logger.error("安全攔截：LIVE 配置綁定了模擬錢包，拒絕真實下單: copyTradingId=${copyTrading.id}")
+                        continue
+                    }
 
                     // 验证账户API凭证
                     if (account.apiKey == null || account.apiSecret == null || account.apiPassphrase == null) {
@@ -913,6 +918,10 @@ open class CopyOrderTrackingService(
                 logger.warn("账户不存在，跳过卖出匹配: accountId=${copyTrading.accountId}, copyTradingId=${copyTrading.id}")
                 return
             }
+        if (WalletType.fromStringOrDefault(account.walletType) == WalletType.SIMULATED) {
+            logger.error("安全攔截：模擬錢包不得建立真實賣單: copyTradingId=${copyTrading.id}")
+            return
+        }
 
         // 验证账户API凭证
         if (account.apiKey == null || account.apiSecret == null || account.apiPassphrase == null) {

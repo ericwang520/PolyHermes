@@ -42,6 +42,8 @@ class OrderSigningService {
             com.wrbug.polymarketbot.enums.WalletType.MAGIC -> 1
             com.wrbug.polymarketbot.enums.WalletType.SAFE -> 2
             com.wrbug.polymarketbot.enums.WalletType.DEPOSIT -> 3
+            com.wrbug.polymarketbot.enums.WalletType.SIMULATED ->
+                throw IllegalArgumentException("模擬錢包不得建立 CLOB 訂單簽名")
         }
     }
 

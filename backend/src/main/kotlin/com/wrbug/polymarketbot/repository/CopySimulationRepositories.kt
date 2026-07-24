@@ -10,6 +10,7 @@ import java.math.BigDecimal
 
 interface CopySimulationSessionRepository : JpaRepository<CopySimulationSession, Long> {
     fun findByCopyTradingId(copyTradingId: Long): CopySimulationSession?
+    fun deleteByCopyTradingId(copyTradingId: Long)
 }
 
 interface CopySimulationPositionRepository : JpaRepository<CopySimulationPosition, Long> {
@@ -24,6 +25,7 @@ interface CopySimulationPositionRepository : JpaRepository<CopySimulationPositio
         copyTradingId: Long,
         marketId: String
     ): List<CopySimulationPosition>
+    fun deleteByCopyTradingId(copyTradingId: Long)
 }
 
 interface CopySimulationTradeRepository : JpaRepository<CopySimulationTrade, Long> {
@@ -34,6 +36,7 @@ interface CopySimulationTradeRepository : JpaRepository<CopySimulationTrade, Lon
     ): Boolean
 
     fun findTop200ByCopyTradingIdOrderByEventTimeDesc(copyTradingId: Long): List<CopySimulationTrade>
+    fun deleteByCopyTradingId(copyTradingId: Long)
     @Query(
         "SELECT COUNT(t) FROM CopySimulationTrade t " +
             "WHERE t.copyTradingId = :copyTradingId AND t.status = 'FILLED' AND t.createdAt >= :createdAt"

@@ -44,6 +44,8 @@ const AddModal: React.FC<AddModalProps> = ({
   const isMobile = useMediaQuery({ maxWidth: 768 })
   const { accounts, fetchAccounts } = useAccountStore()
   const [form] = Form.useForm()
+  const executionMode = Form.useWatch('executionMode', form) || 'PAPER'
+  const selectedAccountId = Form.useWatch('accountId', form)
   const [loading, setLoading] = useState(false)
   const [leaders, setLeaders] = useState<Leader[]>([])
   const [templates, setTemplates] = useState<CopyTradingTemplate[]>([])
@@ -59,6 +61,9 @@ const AddModal: React.FC<AddModalProps> = ({
   // 导入账户modal相关状态
   const [accountImportModalVisible, setAccountImportModalVisible] = useState(false)
   const [accountImportForm] = Form.useForm()
+  const [simulatedWalletModalVisible, setSimulatedWalletModalVisible] = useState(false)
+  const [simulatedWalletForm] = Form.useForm()
+  const [creatingSimulatedWallet, setCreatingSimulatedWallet] = useState(false)
   
   // 添加leader modal相关状态
   const [leaderAddModalVisible, setLeaderAddModalVisible] = useState(false)
@@ -96,6 +101,18 @@ const AddModal: React.FC<AddModalProps> = ({
           available: balance.availableBalance || '0',
           position: balance.positionBalance || '0'
         })
+        const accountId = form.getFieldValue('accountId')
+        const selected = accounts.find(item => item.id === accountId)
+        if (
+          selected?.walletType === 'simulated' &&
+          form.getFieldValue('copyMode') === 'RATIO' &&
+          Number(selected.simulatedBalance || 0) > 0 &&
+          Number(balance.totalBalance || 0) > 0
+        ) {
+          const ratio = Number(selected.simulatedBalance) / Number(balance.totalBalance) * 100
+          form.setFieldValue('copyRatio', Number(ratio.toFixed(4)))
+          message.info(`已自動依雙方資產設定跟單比例 ${ratio.toFixed(4)}%`)
+        }
       } else {
         message.error(response.data.msg || t('copyTradingAdd.fetchAssetInfoFailed') || '获取资产信息失败')
       }
@@ -239,6 +256,35 @@ const AddModal: React.FC<AddModalProps> = ({
   const handleCopyModeChange = (mode: 'RATIO' | 'FIXED') => {
     setCopyMode(mode)
   }
+
+  const applyCapitalWeightedRatio = async () => {
+    const accountId = form.getFieldValue('accountId')
+    if (!accountId || !leaderAssetInfo) {
+      message.warning('請先選擇錢包與 Leader')
+      return
+    }
+    const account = accounts.find(item => item.id === accountId)
+    if (!account) return
+    try {
+      let followerTotal = Number(account.simulatedBalance || 0)
+      if (account.walletType !== 'simulated') {
+        const response = await apiService.accounts.balance({ accountId })
+        if (response.data.code !== 0 || !response.data.data) {
+          throw new Error(response.data.msg || '讀取實盤錢包資產失敗')
+        }
+        followerTotal = Number(response.data.data.totalBalance || 0)
+      }
+      const leaderTotal = Number(leaderAssetInfo.total || 0)
+      if (followerTotal <= 0 || leaderTotal <= 0) {
+        throw new Error('雙方資產必須大於 0')
+      }
+      const ratioPercent = followerTotal / leaderTotal * 100
+      form.setFieldValue('copyRatio', Number(ratioPercent.toFixed(4)))
+      message.success(`已依資產比例設定為 ${ratioPercent.toFixed(4)}%`)
+    } catch (error: any) {
+      message.error(error.message || '計算資產比例失敗')
+    }
+  }
   
   // 处理导入账户成功
   const handleAccountImportSuccess = async (accountId: number) => {
@@ -253,6 +299,38 @@ const AddModal: React.FC<AddModalProps> = ({
     // 关闭modal并重置表单
     setAccountImportModalVisible(false)
     accountImportForm.resetFields()
+  }
+
+  const handleCreateSimulatedWallet = async () => {
+    const values = await simulatedWalletForm.validateFields()
+    setCreatingSimulatedWallet(true)
+    try {
+      const response = await apiService.accounts.createSimulated({
+        accountName: values.accountName?.trim(),
+        initialBalance: values.initialBalance.toString()
+      })
+      if (response.data.code !== 0 || !response.data.data) {
+        throw new Error(response.data.msg || '建立模擬錢包失敗')
+      }
+      await fetchAccounts()
+      form.setFieldValue('accountId', response.data.data.id)
+      if (
+        leaderAssetInfo &&
+        form.getFieldValue('copyMode') === 'RATIO' &&
+        Number(values.initialBalance) > 0 &&
+        Number(leaderAssetInfo.total) > 0
+      ) {
+        const ratio = Number(values.initialBalance) / Number(leaderAssetInfo.total) * 100
+        form.setFieldValue('copyRatio', Number(ratio.toFixed(4)))
+      }
+      setSimulatedWalletModalVisible(false)
+      simulatedWalletForm.resetFields()
+      message.success('模擬錢包已建立；此錢包永遠不會送出真實訂單')
+    } catch (error: any) {
+      message.error(error.message || '建立模擬錢包失敗')
+    } finally {
+      setCreatingSimulatedWallet(false)
+    }
   }
   
   // 处理添加leader成功
@@ -446,7 +524,10 @@ const AddModal: React.FC<AddModalProps> = ({
             name="executionMode"
             rules={[{ required: true }]}
           >
-            <Radio.Group buttonStyle="solid">
+            <Radio.Group
+              buttonStyle="solid"
+              onChange={() => form.setFieldValue('accountId', undefined)}
+            >
               <Radio.Button value="PAPER">模擬跟單（推薦）</Radio.Button>
               <Radio.Button value="LIVE">實盤跟單</Radio.Button>
             </Radio.Group>
@@ -458,16 +539,9 @@ const AddModal: React.FC<AddModalProps> = ({
                 <Alert
                   type="info"
                   showIcon
-                  message="模擬模式不會送出訂單，也不會使用私鑰或 API Key。"
+                  message="模擬模式使用獨立的虛擬錢包與虛擬倉位，不需要私鑰，也永遠不會送出真實訂單。"
                   style={{ marginBottom: 16 }}
                 />
-                <Form.Item
-                  label="模擬初始資金（USDC）"
-                  name="paperInitialBalance"
-                  rules={[{ required: true }, { type: 'number', min: 1 }]}
-                >
-                  <InputNumber min={1} precision={2} style={{ width: '100%' }} />
-                </Form.Item>
               </>
             ) : (
               <>
@@ -496,26 +570,54 @@ const AddModal: React.FC<AddModalProps> = ({
             rules={[{ required: true, message: t('copyTradingAdd.walletRequired') || '请选择钱包' }]}
           >
             <Select 
-              placeholder={t('copyTradingAdd.selectWalletPlaceholder') || '请选择钱包'}
+              placeholder={executionMode === 'PAPER' ? '請選擇或建立模擬錢包' : '請選擇實盤錢包'}
+              dropdownRender={(menu) => (
+                <>
+                  {menu}
+                  <Divider style={{ margin: '8px 0' }} />
+                  <Button
+                    type="text"
+                    icon={<PlusOutlined />}
+                    block
+                    onClick={() => executionMode === 'PAPER'
+                      ? setSimulatedWalletModalVisible(true)
+                      : setAccountImportModalVisible(true)}
+                  >
+                    {executionMode === 'PAPER' ? '建立模擬錢包' : '匯入實盤錢包'}
+                  </Button>
+                </>
+              )}
               notFoundContent={
-                accounts.length === 0 ? (
+                (executionMode === 'PAPER'
+                  ? accounts.filter(a => a.walletType === 'simulated')
+                  : accounts.filter(a => a.walletType !== 'simulated')).length === 0 ? (
                   <div style={{ textAlign: 'center', padding: '12px' }}>
-                    <div style={{ marginBottom: '8px' }}>{t('copyTradingAdd.noAccounts') || '暂无账户'}</div>
+                    <div style={{ marginBottom: '8px' }}>
+                      {executionMode === 'PAPER' ? '尚未建立模擬錢包' : '尚未匯入實盤錢包'}
+                    </div>
                     <Button 
                       type="primary" 
                       icon={<PlusOutlined />}
-                      onClick={() => setAccountImportModalVisible(true)}
+                      onClick={() => executionMode === 'PAPER'
+                        ? setSimulatedWalletModalVisible(true)
+                        : setAccountImportModalVisible(true)}
                       size="small"
                     >
-                      {t('copyTradingAdd.importAccount') || '导入账户'}
+                      {executionMode === 'PAPER' ? '建立模擬錢包' : '匯入實盤錢包'}
                     </Button>
                   </div>
                 ) : null
               }
             >
-              {accounts.map(account => (
+              {accounts
+                .filter(account => executionMode === 'PAPER'
+                  ? account.walletType === 'simulated'
+                  : account.walletType !== 'simulated')
+                .map(account => (
                 <Option key={account.id} value={account.id}>
-                  {account.accountName || `账户 ${account.id}`} ({account.walletAddress.slice(0, 6)}...{account.walletAddress.slice(-4)})
+                  {account.walletType === 'simulated'
+                    ? `${account.accountName || `模擬錢包 ${account.id}`}（初始 $${account.simulatedBalance || '0'}）`
+                    : `${account.accountName || `账户 ${account.id}`} (${account.walletAddress.slice(0, 6)}...${account.walletAddress.slice(-4)})`}
                 </Option>
               ))}
             </Select>
@@ -629,35 +731,46 @@ const AddModal: React.FC<AddModalProps> = ({
           </Form.Item>
           
           {copyMode === 'RATIO' && (
-            <Form.Item
-              label={t('copyTradingAdd.copyRatio') || '跟单比例'}
-              name="copyRatio"
-              tooltip={t('copyTradingAdd.copyRatioTooltip') || '跟单比例表示跟单金额相对于 Leader 订单金额的百分比。例如：100% 表示 1:1 跟单，50% 表示半仓跟单，200% 表示双倍跟单'}
-            >
-              <InputNumber
-                min={0.01}
-                max={10000}
-                step={0.01}
-                precision={2}
-                style={{ width: '100%' }}
-                addonAfter="%"
-                placeholder={t('copyTradingAdd.copyRatioPlaceholder') || '例如：100 表示 100%（1:1 跟单），默认 100%'}
-                parser={(value) => {
-                  const cleaned = (value || '').toString().replace(/%/g, '').trim()
-                  const parsed = parseFloat(cleaned) || 0
-                  if (parsed > 10000) return 10000
-                  if (parsed < 0.01) return 0.01
-                  return parsed
-                }}
-                formatter={(value) => {
-                  if (!value && value !== 0) return ''
-                  const num = parseFloat(value.toString())
-                  if (isNaN(num)) return ''
-                  if (num > 10000) return '10000'
-                  return num.toString().replace(/\.0+$/, '')
-                }}
-              />
-            </Form.Item>
+            <>
+              <Form.Item
+                label={t('copyTradingAdd.copyRatio') || '跟单比例'}
+                name="copyRatio"
+                tooltip="這是 Leader 每筆交易數量的比例，不是勝率。100% 代表逐筆 1:1 複製。"
+              >
+                <InputNumber
+                  min={0.0001}
+                  max={10000}
+                  step={0.0001}
+                  precision={4}
+                  style={{ width: '100%' }}
+                  addonAfter="%"
+                  placeholder="例如：0.158 表示複製 Leader 每筆數量的 0.158%"
+                  parser={(value) => {
+                    const cleaned = (value || '').toString().replace(/%/g, '').trim()
+                    const parsed = parseFloat(cleaned) || 0
+                    if (parsed > 10000) return 10000
+                    if (parsed < 0.0001) return 0.0001
+                    return parsed
+                  }}
+                  formatter={(value) => {
+                    if (!value && value !== 0) return ''
+                    const num = parseFloat(value.toString())
+                    if (isNaN(num)) return ''
+                    if (num > 10000) return '10000'
+                    return num.toString().replace(/\.0+$/, '')
+                  }}
+                />
+              </Form.Item>
+              <Button
+                type="dashed"
+                block
+                onClick={applyCapitalWeightedRatio}
+                disabled={!selectedAccountId || !leaderAssetInfo}
+                style={{ marginTop: -8, marginBottom: 16 }}
+              >
+                依雙方總資產自動計算比例
+              </Button>
+            </>
           )}
           
           {copyMode === 'FIXED' && (
@@ -1154,6 +1267,40 @@ const AddModal: React.FC<AddModalProps> = ({
       </Modal>
       
       {/* 导入账户 Modal */}
+      <Modal
+        title="建立模擬錢包"
+        open={simulatedWalletModalVisible}
+        onCancel={() => setSimulatedWalletModalVisible(false)}
+        onOk={handleCreateSimulatedWallet}
+        confirmLoading={creatingSimulatedWallet}
+        okText="建立並選取"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Alert
+          type="success"
+          showIcon
+          message="這是完全虛擬的測試資金，不需要充值，也無法發送真實交易。"
+          style={{ marginBottom: 16 }}
+        />
+        <Form
+          form={simulatedWalletForm}
+          layout="vertical"
+          initialValues={{ accountName: '我的模擬錢包', initialBalance: 49.55 }}
+        >
+          <Form.Item label="名稱" name="accountName">
+            <Input maxLength={100} placeholder="例如：bosona 測試帳本" />
+          </Form.Item>
+          <Form.Item
+            label="初始虛擬資金（USDC）"
+            name="initialBalance"
+            rules={[{ required: true }, { type: 'number', min: 1 }]}
+          >
+            <InputNumber min={1} precision={2} style={{ width: '100%' }} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
       <Modal
         title={t('accountImport.title') || '导入账户'}
         open={accountImportModalVisible}

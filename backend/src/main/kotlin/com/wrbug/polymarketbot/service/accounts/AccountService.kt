@@ -673,6 +673,18 @@ class AccountService(
             val account = accountRepository.findById(accountId).orElse(null)
                 ?: return Result.failure(IllegalArgumentException("账户不存在"))
 
+            if (WalletType.fromStringOrDefault(account.walletType) == WalletType.SIMULATED) {
+                val balance = account.simulatedBalance ?: BigDecimal.ZERO
+                return Result.success(
+                    AccountBalanceResponse(
+                        availableBalance = balance.toPlainString(),
+                        positionBalance = "0",
+                        totalBalance = balance.toPlainString(),
+                        positions = emptyList()
+                    )
+                )
+            }
+
             // 检查代理地址是否存在
             if (account.proxyAddress.isBlank()) {
                 logger.error("账户 ${account.id} 的代理地址为空，无法查询余额")
@@ -710,6 +722,9 @@ class AccountService(
             accountName = account.accountName,
             isEnabled = account.isEnabled,
             walletType = account.walletType,
+            simulated = WalletType.fromStringOrDefault(account.walletType) == WalletType.SIMULATED,
+            simulatedBalance = account.simulatedBalance?.toPlainString(),
+            balance = account.simulatedBalance?.toPlainString(),
             apiKeyConfigured = account.apiKey != null,
             apiSecretConfigured = account.apiSecret != null,
             apiPassphraseConfigured = account.apiPassphrase != null,
@@ -735,6 +750,9 @@ class AccountService(
                 accountName = account.accountName,
                 isEnabled = account.isEnabled,
                 walletType = account.walletType,
+                simulated = WalletType.fromStringOrDefault(account.walletType) == WalletType.SIMULATED,
+                simulatedBalance = account.simulatedBalance?.toPlainString(),
+                balance = account.simulatedBalance?.toPlainString(),
                 apiKeyConfigured = account.apiKey != null,
                 apiSecretConfigured = account.apiSecret != null,
                 apiPassphraseConfigured = account.apiPassphrase != null,
@@ -938,9 +956,9 @@ class AccountService(
         if (accounts.isEmpty()) return
         for (account in accounts) {
             try {
-                val privateKey = decryptPrivateKey(account)
                 val walletType = WalletType.fromStringOrDefault(account.walletType, WalletType.SAFE)
-                if (walletType == WalletType.DEPOSIT) continue
+                if (walletType == WalletType.DEPOSIT || walletType == WalletType.SIMULATED) continue
+                val privateKey = decryptPrivateKey(account)
                 blockchainService.unwrapWcolForProxy(
                     privateKey = privateKey,
                     proxyAddress = account.proxyAddress,
@@ -1001,6 +1019,9 @@ class AccountService(
 
             // 遍历所有账户，查询每个账户的仓位
             accounts.forEach { account ->
+                if (WalletType.fromStringOrDefault(account.walletType) == WalletType.SIMULATED) {
+                    return@forEach
+                }
                 if (account.proxyAddress.isNotBlank()) {
                     try {
                         // 查询所有仓位（不限制 sortBy，获取当前和历史仓位）

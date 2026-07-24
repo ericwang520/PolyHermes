@@ -313,7 +313,7 @@ const EditModal: React.FC<EditModalProps> = ({
           </Form.Item>
 
           <Form.Item label="執行模式" name="executionMode" rules={[{ required: true }]}>
-            <Radio.Group buttonStyle="solid">
+            <Radio.Group buttonStyle="solid" disabled>
               <Radio.Button value="PAPER">模擬跟單</Radio.Button>
               <Radio.Button value="LIVE">實盤跟單</Radio.Button>
             </Radio.Group>
@@ -322,17 +322,22 @@ const EditModal: React.FC<EditModalProps> = ({
           <Form.Item noStyle shouldUpdate={(prev, current) => prev.executionMode !== current.executionMode}>
             {({ getFieldValue }) => getFieldValue('executionMode') === 'PAPER' ? (
               <>
-                <Alert type="info" showIcon message="模擬模式不會送出真實訂單。" style={{ marginBottom: 16 }} />
+                <Alert
+                  type="info"
+                  showIcon
+                  message="此配置使用獨立模擬錢包，永遠不會送出真實訂單。若要實盤，請新增一份實盤配置以保留模擬紀錄。"
+                  style={{ marginBottom: 16 }}
+                />
                 <Form.Item
                   label="模擬初始資金（USDC）"
                   name="paperInitialBalance"
                   rules={[{ required: true }, { type: 'number', min: 1 }]}
                 >
-                  <InputNumber min={1} precision={2} style={{ width: '100%' }} />
+                  <InputNumber min={1} precision={2} style={{ width: '100%' }} disabled />
                 </Form.Item>
               </>
             ) : (
-              <Alert type="error" showIcon message="切換到實盤後，下一筆事件可能建立真實訂單。" style={{ marginBottom: 16 }} />
+              <Alert type="error" showIcon message="這是實盤配置，符合條件的下一筆事件可能建立真實訂單。" style={{ marginBottom: 16 }} />
             )}
           </Form.Item>
           

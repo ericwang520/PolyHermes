@@ -20,7 +20,12 @@ enum class WalletType(val value: String, val description: String) {
      * Deposit Wallet（2026 年新版 Polymarket 钱包）
      * CLOB V2 订单使用 POLY_1271 / signatureType=3。
      */
-    DEPOSIT("deposit", "Deposit Wallet（POLY_1271）");
+    DEPOSIT("deposit", "Deposit Wallet（POLY_1271）"),
+
+    /**
+     * 仅用于 PAPER 模式的虚拟钱包。没有私钥、API 凭证，也不能发起真实交易。
+     */
+    SIMULATED("simulated", "模擬錢包（不會真實下單）");
 
     
     companion object {

@@ -242,6 +242,12 @@ export const apiService = {
      */
     import: (data: any) =>
       apiClient.post<ApiResponse<any>>('/accounts/import', data),
+
+    /**
+     * 建立只用于 PAPER 模式的模拟钱包
+     */
+    createSimulated: (data: { accountName?: string; initialBalance: string }) =>
+      apiClient.post<ApiResponse<any>>('/accounts/simulated/create', data),
     
     /**
      * 检查账户设置状态
@@ -498,6 +504,8 @@ export const apiService = {
 
     simulationSummary: (data: { copyTradingId: number }) =>
       apiClient.post<ApiResponse<any>>('/copy-trading/configs/simulation/summary', data),
+    resetSimulation: (data: { copyTradingId: number }) =>
+      apiClient.post<ApiResponse<any>>('/copy-trading/configs/simulation/reset', data),
     
     /**
      * 更新跟单状态（兼容旧接口）

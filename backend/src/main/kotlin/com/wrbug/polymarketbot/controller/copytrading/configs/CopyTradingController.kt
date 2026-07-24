@@ -96,6 +96,18 @@ class CopyTradingController(
         }
         return ResponseEntity.ok(ApiResponse.success(copySimulationService.summary(request.copyTradingId)))
     }
+
+    @PostMapping("/simulation/reset")
+    fun resetSimulation(
+        @RequestBody request: CopySimulationSummaryRequest
+    ): ResponseEntity<ApiResponse<CopySimulationSummaryDto?>> {
+        if (request.copyTradingId <= 0) {
+            return ResponseEntity.ok(
+                ApiResponse.error(ErrorCode.PARAM_COPY_TRADING_ID_INVALID, messageSource = messageSource)
+            )
+        }
+        return ResponseEntity.ok(ApiResponse.success(copySimulationService.reset(request.copyTradingId)))
+    }
     
     /**
      * 更新跟单配置

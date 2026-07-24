@@ -9,6 +9,7 @@ import com.wrbug.polymarketbot.repository.CopyTradingRepository
 import com.wrbug.polymarketbot.repository.CopyTradingTemplateRepository
 import com.wrbug.polymarketbot.repository.LeaderRepository
 import com.wrbug.polymarketbot.enums.CopyExecutionMode
+import com.wrbug.polymarketbot.enums.WalletType
 import com.wrbug.polymarketbot.service.copytrading.monitor.CopyTradingMonitorService
 import com.google.gson.Gson
 import com.wrbug.polymarketbot.util.IllegalBigDecimal
@@ -74,6 +75,14 @@ class CopyTradingService(
                 return Result.failure(IllegalArgumentException("配置名不能为空"))
             }
             val executionMode = CopyExecutionMode.parse(request.executionMode).name
+            validateExecutionAccount(account, executionMode)
+            if (executionMode == CopyExecutionMode.PAPER.name &&
+                copyTradingRepository.findByAccountId(account.id!!).isNotEmpty()
+            ) {
+                return Result.failure(
+                    IllegalArgumentException("一個模擬錢包只能綁定一個跟單配置，請建立新的模擬錢包")
+                )
+            }
             
             // 5. 获取配置参数（从模板填充或手动输入）
             val config = if (request.templateId != null) {
@@ -146,9 +155,13 @@ class CopyTradingService(
                 leaderId = request.leaderId,
                 enabled = request.enabled,
                 executionMode = executionMode,
-                followOnchainActions = request.followOnchainActions,
-                paperInitialBalance = request.paperInitialBalance.toSafeBigDecimal().also {
-                    require(it > BigDecimal.ZERO) { "paperInitialBalance 必须大于 0" }
+                followOnchainActions = executionMode == CopyExecutionMode.LIVE.name && request.followOnchainActions,
+                paperInitialBalance = if (executionMode == CopyExecutionMode.PAPER.name) {
+                    requireNotNull(account.simulatedBalance) { "模擬錢包缺少初始資金" }
+                } else {
+                    request.paperInitialBalance.toSafeBigDecimal().also {
+                        require(it > BigDecimal.ZERO) { "paperInitialBalance 必须大于 0" }
+                    }
                 },
                 copyMode = config.copyMode,
                 copyRatio = config.copyRatio,
@@ -184,7 +197,9 @@ class CopyTradingService(
                 kotlinx.coroutines.runBlocking {
                     try {
                         monitorService.updateLeaderMonitoring(saved.leaderId)
-                        monitorService.updateAccountMonitoring(saved.accountId)
+                        if (saved.executionMode == CopyExecutionMode.LIVE.name) {
+                            monitorService.updateAccountMonitoring(saved.accountId)
+                        }
                     } catch (e: Exception) {
                         logger.error("更新监听失败", e)
                     }
@@ -206,6 +221,13 @@ class CopyTradingService(
         return try {
             val copyTrading = copyTradingRepository.findById(request.copyTradingId).orElse(null)
                 ?: return Result.failure(IllegalArgumentException("跟单配置不存在"))
+
+            val requestedMode = request.executionMode?.let { CopyExecutionMode.parse(it).name }
+            if (requestedMode != null && requestedMode != copyTrading.executionMode) {
+                return Result.failure(
+                    IllegalArgumentException("為保留模擬紀錄，執行模式不可直接切換；請建立新的實盤或模擬配置")
+                )
+            }
             
             // 验证配置名（如果提供了配置名，进行强校验）
             val configName = if (request.configName != null) {
@@ -221,12 +243,11 @@ class CopyTradingService(
             // 更新字段（只更新提供的字段）
             val updated = copyTrading.copy(
                 enabled = request.enabled ?: copyTrading.enabled,
-                executionMode = request.executionMode?.let { CopyExecutionMode.parse(it).name }
-                    ?: copyTrading.executionMode,
-                followOnchainActions = request.followOnchainActions ?: copyTrading.followOnchainActions,
-                paperInitialBalance = request.paperInitialBalance?.toSafeBigDecimal()?.also {
-                    require(it > BigDecimal.ZERO) { "paperInitialBalance 必须大于 0" }
-                } ?: copyTrading.paperInitialBalance,
+                executionMode = copyTrading.executionMode,
+                followOnchainActions = if (copyTrading.executionMode == CopyExecutionMode.LIVE.name) {
+                    request.followOnchainActions ?: copyTrading.followOnchainActions
+                } else false,
+                paperInitialBalance = copyTrading.paperInitialBalance,
                 copyMode = request.copyMode ?: copyTrading.copyMode,
                 copyRatio = request.copyRatio?.toSafeBigDecimal() ?: copyTrading.copyRatio,
                 fixedAmount = request.fixedAmount?.toSafeBigDecimal() ?: copyTrading.fixedAmount,
@@ -322,7 +343,9 @@ class CopyTradingService(
             kotlinx.coroutines.runBlocking {
                 try {
                     monitorService.updateLeaderMonitoring(saved.leaderId)
-                    monitorService.updateAccountMonitoring(saved.accountId)
+                    if (saved.executionMode == CopyExecutionMode.LIVE.name) {
+                        monitorService.updateAccountMonitoring(saved.accountId)
+                    }
                 } catch (e: Exception) {
                     logger.error("更新监听失败", e)
                 }
@@ -591,6 +614,23 @@ class CopyTradingService(
         } catch (e: Exception) {
             logger.error("解析关键字 JSON 失败", e)
             null
+        }
+    }
+
+    private fun validateExecutionAccount(account: Account, executionMode: String) {
+        val walletType = WalletType.fromStringOrDefault(account.walletType)
+        when (executionMode) {
+            CopyExecutionMode.PAPER.name -> require(walletType == WalletType.SIMULATED) {
+                "模擬模式必須選擇模擬錢包"
+            }
+            CopyExecutionMode.LIVE.name -> {
+                require(walletType != WalletType.SIMULATED) { "實盤模式不能使用模擬錢包" }
+                require(
+                    !account.apiKey.isNullOrBlank() &&
+                        !account.apiSecret.isNullOrBlank() &&
+                        !account.apiPassphrase.isNullOrBlank()
+                ) { "實盤錢包尚未設定完整的 Polymarket API 憑證" }
+            }
         }
     }
     

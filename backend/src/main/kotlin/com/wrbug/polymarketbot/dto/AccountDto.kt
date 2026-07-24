@@ -11,6 +11,11 @@ data class AccountImportRequest(
     val walletType: String = "magic"  // 钱包类型：magic、safe 或 deposit（POLY_1271）
 )
 
+data class SimulatedAccountCreateRequest(
+    val accountName: String? = null,
+    val initialBalance: String = "1000"
+)
+
 /**
  * 检查代理地址选项请求
  */
@@ -104,7 +109,9 @@ data class AccountDto(
     val proxyAddress: String,  // Polymarket 代理钱包地址
     val accountName: String?,
     val isEnabled: Boolean,  // 是否启用（用于订单推送等功能的开关）
-    val walletType: String = "magic",  // 钱包类型：magic、safe 或 deposit（POLY_1271）
+    val walletType: String = "magic",  // 钱包类型：magic、safe、deposit 或 simulated
+    val simulated: Boolean = false,
+    val simulatedBalance: String? = null,
     val apiKeyConfigured: Boolean,  // API Key 是否已配置（不返回实际 Key）
     val apiSecretConfigured: Boolean,  // API Secret 是否已配置
     val apiPassphraseConfigured: Boolean,  // API Passphrase 是否已配置

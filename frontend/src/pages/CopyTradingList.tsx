@@ -172,6 +172,32 @@ const CopyTradingList: React.FC = () => {
     setStatisticsModalCopyTradingId(record.id.toString())
     setStatisticsModalOpen(true)
   }
+
+  const resetSimulation = (copyTradingId: number) => {
+    Modal.confirm({
+      title: '重置模擬帳本？',
+      content: '所有虛擬持倉、交易與盈虧紀錄都會清除，資金回到這個模擬錢包的初始值。此操作不影響任何真實資產。',
+      okText: '確認重置',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: async () => {
+        const response = await apiService.copyTrading.resetSimulation({ copyTradingId })
+        if (response.data.code !== 0) {
+          throw new Error(response.data.msg || '重置模擬帳本失敗')
+        }
+        if (response.data.data) {
+          setSimulationMap(prev => ({ ...prev, [copyTradingId]: response.data.data as CopySimulationSummary }))
+        } else {
+          setSimulationMap(prev => {
+            const next = { ...prev }
+            delete next[copyTradingId]
+            return next
+          })
+        }
+        message.success('模擬帳本已重置')
+      }
+    })
+  }
   
   const getPnlColor = (value: string): string => {
     const num = parseFloat(value)
@@ -774,7 +800,11 @@ const CopyTradingList: React.FC = () => {
         title="模擬跟單帳本"
         open={simulationModalOpen}
         onCancel={() => setSimulationModalOpen(false)}
-        footer={null}
+        footer={simulationModalCopyTradingId == null ? null : (
+          <Button danger onClick={() => resetSimulation(simulationModalCopyTradingId)}>
+            重置模擬帳本
+          </Button>
+        )}
         width={1000}
       >
         {simulationModalCopyTradingId == null || (loadingStatistics.has(simulationModalCopyTradingId) && !simulationMap[simulationModalCopyTradingId]) ? (

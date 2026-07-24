@@ -3,6 +3,7 @@ package com.wrbug.polymarketbot.controller.accounts
 import com.wrbug.polymarketbot.dto.*
 import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.service.accounts.AccountService
+import com.wrbug.polymarketbot.service.accounts.SimulatedAccountService
 import com.wrbug.polymarketbot.util.toSafeBigDecimal
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
@@ -18,10 +19,24 @@ import java.math.BigDecimal
 @RequestMapping("/api/accounts")
 class AccountController(
     private val accountService: AccountService,
+    private val simulatedAccountService: SimulatedAccountService,
     private val messageSource: MessageSource
 ) {
 
     private val logger = LoggerFactory.getLogger(AccountController::class.java)
+
+    @PostMapping("/simulated/create")
+    fun createSimulatedAccount(
+        @RequestBody request: SimulatedAccountCreateRequest
+    ): ResponseEntity<ApiResponse<AccountDto>> {
+        return simulatedAccountService.create(request).fold(
+            onSuccess = { ResponseEntity.ok(ApiResponse.success(it)) },
+            onFailure = {
+                logger.error("建立模擬錢包失敗: ${it.message}", it)
+                ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ERROR, it.message, messageSource))
+            }
+        )
+    }
 
     /**
      * 检查代理地址选项（用于导入前选择代理类型）

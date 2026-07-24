@@ -380,4 +380,22 @@ class CopySimulationService(
             updatedAt = session.updatedAt
         )
     }
+
+    @Transactional
+    fun reset(copyTradingId: Long): CopySimulationSummaryDto? {
+        val current = sessionRepository.findByCopyTradingId(copyTradingId) ?: return null
+        val initialCash = current.initialCash
+        tradeRepository.deleteByCopyTradingId(copyTradingId)
+        positionRepository.deleteByCopyTradingId(copyTradingId)
+        sessionRepository.deleteByCopyTradingId(copyTradingId)
+        sessionRepository.flush()
+        sessionRepository.save(
+            CopySimulationSession(
+                copyTradingId = copyTradingId,
+                initialCash = initialCash,
+                cashBalance = initialCash
+            )
+        )
+        return summary(copyTradingId)
+    }
 }

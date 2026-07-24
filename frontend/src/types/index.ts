@@ -16,7 +16,9 @@ export interface Account {
   proxyAddress: string  // Polymarket 代理钱包地址
   accountName?: string
   isEnabled?: boolean  // 是否启用
-  walletType?: string  // 钱包类型：magic、safe 或 deposit（POLY_1271）
+  walletType?: string  // 钱包类型：magic、safe、deposit 或 simulated
+  simulated?: boolean
+  simulatedBalance?: string
   apiKeyConfigured: boolean
   apiSecretConfigured: boolean
   apiPassphraseConfigured: boolean
@@ -44,6 +46,11 @@ export interface AccountImportRequest {
   walletAddress: string
   accountName?: string
   walletType?: string  // 钱包类型：magic、safe 或 deposit（POLY_1271）
+}
+
+export interface SimulatedAccountCreateRequest {
+  accountName?: string
+  initialBalance: string
 }
 
 /**
