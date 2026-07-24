@@ -297,4 +297,75 @@ class CopySimulationServiceTest {
         assertTrue(message.contains("0.31 USDC"))
         assertTrue(message.contains("沒有送出真實訂單"))
     }
+
+    @Test
+    fun `redeem settles winning and losing positions for the whole condition`() = runTest {
+        val session = CopySimulationSession(
+            id = 9,
+            copyTradingId = 20,
+            initialCash = BigDecimal("10"),
+            cashBalance = BigDecimal("10")
+        )
+        val yes = CopySimulationPosition(
+            id = 91,
+            sessionId = 9,
+            copyTradingId = 20,
+            marketId = "condition-redeem",
+            outcomeIndex = 0,
+            quantity = BigDecimal("3"),
+            leaderQuantity = BigDecimal("3"),
+            averageCost = BigDecimal("0.4")
+        )
+        val no = CopySimulationPosition(
+            id = 92,
+            sessionId = 9,
+            copyTradingId = 20,
+            marketId = "condition-redeem",
+            outcomeIndex = 1,
+            quantity = BigDecimal("2"),
+            leaderQuantity = BigDecimal("2"),
+            averageCost = BigDecimal("0.3")
+        )
+        var savedTrade: CopySimulationTrade? = null
+
+        `when`(tradeRepository.existsByCopyTradingIdAndLeaderTradeIdAndAction(20, "redeem-1", "REDEEM"))
+            .thenReturn(false)
+        `when`(sessionRepository.findByCopyTradingId(20)).thenReturn(session)
+        `when`(
+            positionRepository.findByCopyTradingIdAndMarketIdOrderByOutcomeIndex(20, "condition-redeem")
+        ).thenReturn(listOf(yes, no))
+        `when`(positionRepository.save(any(CopySimulationPosition::class.java))).thenAnswer {
+            it.getArgument<CopySimulationPosition>(0)
+        }
+        `when`(sessionRepository.save(any(CopySimulationSession::class.java))).thenAnswer {
+            it.getArgument<CopySimulationSession>(0)
+        }
+        `when`(tradeRepository.save(any(CopySimulationTrade::class.java))).thenAnswer {
+            it.getArgument<CopySimulationTrade>(0).also { trade -> savedTrade = trade }
+        }
+
+        val result = service.process(
+            CopyTrading(id = 20, accountId = 1, leaderId = 2, executionMode = "PAPER"),
+            TradeResponse(
+                id = "redeem-1",
+                market = "condition-redeem",
+                side = "REDEEM",
+                price = "0",
+                size = "3",
+                timestamp = "1760000000",
+                user = "0xleader",
+                outcomeIndex = 0
+            )
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals(0, yes.quantity.compareTo(BigDecimal.ZERO))
+        assertEquals(0, no.quantity.compareTo(BigDecimal.ZERO))
+        assertEquals(0, yes.lastPrice!!.compareTo(BigDecimal.ONE))
+        assertEquals(0, no.lastPrice!!.compareTo(BigDecimal.ZERO))
+        assertEquals(0, session.cashBalance.compareTo(BigDecimal("13")))
+        assertEquals(0, session.realizedPnl.compareTo(BigDecimal("1.2")))
+        assertEquals("FILLED", savedTrade!!.status)
+        assertEquals(0, savedTrade!!.notional.compareTo(BigDecimal("3")))
+    }
 }

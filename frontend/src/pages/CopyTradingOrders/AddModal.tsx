@@ -566,9 +566,9 @@ const AddModal: React.FC<AddModalProps> = ({
                   name="followOnchainActions"
                   valuePropName="checked"
                   initialValue={false}
-                  tooltip="高風險功能，預設關閉；目前自動鏈上跟隨仍會安全跳過。"
+                  tooltip="預設關閉。啟用後，Leader MERGE 時只合併您的實際成對持倉；REDEEM 時只贖回您的實際可贖回持倉。"
                 >
-                  <Switch disabled />
+                  <Switch />
                 </Form.Item>
               </>
             )}

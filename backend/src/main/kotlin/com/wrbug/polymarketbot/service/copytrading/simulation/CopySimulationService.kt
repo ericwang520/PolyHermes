@@ -32,6 +32,7 @@ import java.math.RoundingMode
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
+import java.util.concurrent.ConcurrentHashMap
 
 @Service
 class CopySimulationService(
@@ -44,14 +45,22 @@ class CopySimulationService(
 ) {
     private val logger = LoggerFactory.getLogger(CopySimulationService::class.java)
     private val notificationScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val suppressedNotifications = ConcurrentHashMap.newKeySet<String>()
 
     @Transactional
-    suspend fun process(copyTrading: CopyTrading, leaderTrade: TradeResponse): Result<Unit> {
+    suspend fun process(
+        copyTrading: CopyTrading,
+        leaderTrade: TradeResponse,
+        sendNotification: Boolean = true
+    ): Result<Unit> {
         if (copyTrading.executionMode != "PAPER") return Result.success(Unit)
         val configId = copyTrading.id
             ?: return Result.failure(IllegalArgumentException("模拟配置尚未保存"))
         val action = leaderTrade.side.uppercase()
+        val notificationKey = notificationKey(configId, leaderTrade.id, action)
+        if (!sendNotification) suppressedNotifications.add(notificationKey)
         if (tradeRepository.existsByCopyTradingIdAndLeaderTradeIdAndAction(configId, leaderTrade.id, action)) {
+            suppressedNotifications.remove(notificationKey)
             return Result.success(Unit)
         }
 
@@ -88,6 +97,8 @@ class CopySimulationService(
         } catch (e: Exception) {
             logger.error("模拟跟单失败: configId={}, tradeId={}", configId, leaderTrade.id, e)
             Result.failure(e)
+        } finally {
+            suppressedNotifications.remove(notificationKey)
         }
     }
 
@@ -374,38 +385,50 @@ class CopySimulationService(
     }
 
     private fun simulateRedeem(config: CopyTrading, session: CopySimulationSession, trade: TradeResponse) {
-        val outcomeIndex = trade.outcomeIndex
-            ?: return record(session, config, trade, "REDEEM", "SKIPPED", "缺少中奖 outcomeIndex")
-        val position = positionRepository.findByCopyTradingIdAndMarketIdAndOutcomeIndex(
-            config.id!!, trade.market, outcomeIndex
-        ) ?: return record(session, config, trade, "REDEEM", "SKIPPED", "没有可赎回的模拟持仓")
-        val eventQuantity = trade.size.toSafeBigDecimal()
-        val effectiveRatio = if (position.leaderQuantity > BigDecimal.ZERO) {
-            position.quantity.divide(position.leaderQuantity, 12, RoundingMode.DOWN)
-        } else {
-            BigDecimal.ONE
+        val positions = positionRepository.findByCopyTradingIdAndMarketIdOrderByOutcomeIndex(
+            config.id!!, trade.market
+        ).filter { it.quantity > BigDecimal.ZERO }
+        if (positions.isEmpty()) {
+            return record(session, config, trade, "REDEEM", "SKIPPED", "没有可赎回的模拟持仓")
         }
-        val quantity = minOf(
-            position.quantity,
-            if (eventQuantity > BigDecimal.ZERO) eventQuantity.multiply(effectiveRatio) else position.quantity
-        )
-        if (quantity <= BigDecimal.ZERO) {
-            return record(session, config, trade, "REDEEM", "SKIPPED", "可赎回数量为 0")
+
+        // A redemption settles the whole condition: winning tokens pay $1 and
+        // losing tokens are burned for $0. Data API uses outcomeIndex=999 and
+        // amount=0 when the leader only redeemed losing inventory.
+        val winningOutcome = trade.outcomeIndex?.takeIf { outcome ->
+            outcome in 0..1 && trade.size.toSafeBigDecimal() > BigDecimal.ZERO
         }
-        val payout = quantity
-        val realized = BigDecimal.ONE.subtract(position.averageCost).multiply(quantity)
-        position.quantity = position.quantity.subtract(quantity)
-        position.leaderQuantity = position.leaderQuantity
-            .subtract(minOf(position.leaderQuantity, eventQuantity))
-            .max(BigDecimal.ZERO)
-        position.realizedPnl = position.realizedPnl.add(realized)
-        position.lastPrice = BigDecimal.ONE
-        position.valuationStatus = "SETTLED"
-        if (position.quantity.compareTo(BigDecimal.ZERO) == 0) position.averageCost = BigDecimal.ZERO
-        position.updatedAt = System.currentTimeMillis()
-        positionRepository.save(position)
+        val payout = positions
+            .filter { it.outcomeIndex == winningOutcome }
+            .fold(BigDecimal.ZERO) { total, position -> total.add(position.quantity) }
+        val cost = positions.fold(BigDecimal.ZERO) { total, position ->
+            total.add(position.averageCost.multiply(position.quantity))
+        }
+        val realized = payout.subtract(cost)
+        val totalQuantity = positions.fold(BigDecimal.ZERO) { total, position ->
+            total.add(position.quantity)
+        }
+
+        positions.forEach { position ->
+            val positionPayout = if (position.outcomeIndex == winningOutcome) position.quantity else BigDecimal.ZERO
+            val positionRealized = positionPayout.subtract(position.averageCost.multiply(position.quantity))
+            position.realizedPnl = position.realizedPnl.add(positionRealized)
+            position.quantity = BigDecimal.ZERO
+            position.leaderQuantity = BigDecimal.ZERO
+            position.averageCost = BigDecimal.ZERO
+            position.lastPrice = if (position.outcomeIndex == winningOutcome) BigDecimal.ONE else BigDecimal.ZERO
+            position.valuationStatus = "SETTLED"
+            position.updatedAt = System.currentTimeMillis()
+            positionRepository.save(position)
+        }
         settleSession(session, payout, realized)
-        record(session, config, trade, "REDEEM", "FILLED", null, BigDecimal.ONE, quantity, payout, realized)
+        record(
+            session, config, trade, "REDEEM", "FILLED", null,
+            winningOutcome?.let { BigDecimal.ONE } ?: BigDecimal.ZERO,
+            totalQuantity,
+            payout,
+            realized
+        )
     }
 
     private fun settleSession(session: CopySimulationSession, payout: BigDecimal, realized: BigDecimal) {
@@ -465,6 +488,7 @@ class CopySimulationService(
         session: CopySimulationSession,
         trade: CopySimulationTrade
     ) {
+        if (suppressedNotifications.contains(notificationKey(config.id!!, trade.leaderTradeId, trade.action))) return
         val service = telegramNotificationService ?: return
         if (!shouldSendNotification(config, trade.status)) return
         val message = buildNotificationMessage(config, session, trade)
@@ -494,6 +518,9 @@ class CopySimulationService(
             send()
         }
     }
+
+    private fun notificationKey(copyTradingId: Long, leaderTradeId: String, action: String): String =
+        "$copyTradingId:$leaderTradeId:${action.uppercase()}"
 
     internal fun shouldSendNotification(config: CopyTrading, status: String): Boolean =
         when (status) {
@@ -619,6 +646,7 @@ class CopySimulationService(
     fun reset(copyTradingId: Long): CopySimulationSummaryDto? {
         val current = sessionRepository.findByCopyTradingId(copyTradingId) ?: return null
         val initialCash = current.initialCash
+        val originAt = current.originAt
         shareAccumulatorService?.clear(copyTradingId)
         tradeRepository.deleteByCopyTradingId(copyTradingId)
         positionRepository.deleteByCopyTradingId(copyTradingId)
@@ -628,7 +656,8 @@ class CopySimulationService(
             CopySimulationSession(
                 copyTradingId = copyTradingId,
                 initialCash = initialCash,
-                cashBalance = initialCash
+                cashBalance = initialCash,
+                originAt = originAt
             )
         )
         return summary(copyTradingId)

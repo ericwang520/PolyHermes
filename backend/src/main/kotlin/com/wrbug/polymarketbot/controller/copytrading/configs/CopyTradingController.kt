@@ -5,6 +5,8 @@ import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.service.copytrading.configs.CopyTradingService
 import com.wrbug.polymarketbot.service.copytrading.configs.FilteredOrderService
 import com.wrbug.polymarketbot.service.copytrading.simulation.CopySimulationService
+import com.wrbug.polymarketbot.service.copytrading.simulation.CopySimulationReplayService
+import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import org.springframework.context.MessageSource
 import org.springframework.http.ResponseEntity
@@ -19,6 +21,7 @@ class CopyTradingController(
     private val copyTradingService: CopyTradingService,
     private val filteredOrderService: FilteredOrderService,
     private val copySimulationService: CopySimulationService,
+    private val copySimulationReplayService: CopySimulationReplayService,
     private val messageSource: MessageSource
 ) {
     
@@ -107,6 +110,32 @@ class CopyTradingController(
             )
         }
         return ResponseEntity.ok(ApiResponse.success(copySimulationService.reset(request.copyTradingId)))
+    }
+
+    @PostMapping("/simulation/rebuild")
+    fun rebuildSimulation(
+        @RequestBody request: CopySimulationSummaryRequest
+    ): ResponseEntity<ApiResponse<CopySimulationSummaryDto?>> {
+        if (request.copyTradingId <= 0) {
+            return ResponseEntity.ok(
+                ApiResponse.error(ErrorCode.PARAM_COPY_TRADING_ID_INVALID, messageSource = messageSource)
+            )
+        }
+        return runBlocking {
+            copySimulationReplayService.rebuild(request.copyTradingId).fold(
+                onSuccess = { ResponseEntity.ok(ApiResponse.success(it)) },
+                onFailure = {
+                    logger.error("重建模拟账本失败: copyTradingId=${request.copyTradingId}", it)
+                    ResponseEntity.ok(
+                        ApiResponse.error(
+                            ErrorCode.SERVER_COPY_TRADING_LIST_FETCH_FAILED,
+                            it.message,
+                            messageSource
+                        )
+                    )
+                }
+            )
+        }
     }
     
     /**

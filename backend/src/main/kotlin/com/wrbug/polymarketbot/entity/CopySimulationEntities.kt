@@ -22,6 +22,8 @@ data class CopySimulationSession(
     var tradeCount: Int = 0,
     @Column(name = "status", nullable = false, length = 20)
     var status: String = "ACTIVE",
+    @Column(name = "origin_at", nullable = false)
+    val originAt: Long = System.currentTimeMillis(),
     @Column(name = "created_at", nullable = false)
     val createdAt: Long = System.currentTimeMillis(),
     @Column(name = "updated_at", nullable = false)

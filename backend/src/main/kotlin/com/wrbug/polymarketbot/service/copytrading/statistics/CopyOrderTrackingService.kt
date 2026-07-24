@@ -59,6 +59,7 @@ open class CopyOrderTrackingService(
     private val cryptoUtils: CryptoUtils,
     private val marketService: MarketService,  // 市场信息服务
     private val copySimulationService: CopySimulationService,
+    private val copyLiveSettlementService: CopyLiveSettlementService,
     private val copyExecutionEventService: CopyExecutionEventService,
     private val telegramNotificationService: TelegramNotificationService? = null  // 可选，避免循环依赖
 ) : ApplicationContextAware {
@@ -855,25 +856,25 @@ open class CopyOrderTrackingService(
 
     @Transactional
     suspend fun processSettlementTrade(leaderId: Long, trade: TradeResponse): Result<Unit> {
+        val failures = mutableListOf<String>()
         return try {
             copyTradingRepository.findByLeaderIdAndEnabledTrue(leaderId).forEach { copyTrading ->
-                if (copyTrading.executionMode == "PAPER") {
-                    copySimulationService.process(copyTrading, trade).getOrThrow()
-                } else if (!copyTrading.followOnchainActions) {
-                    logger.info(
-                        "实盘链上跟随未启用，跳过: copyTradingId={}, action={}, tradeId={}",
-                        copyTrading.id, trade.side, trade.id
-                    )
-                } else {
-                    // 自动链上跟随需要按 follower 自有持仓缩放，不能照抄 leader 数量。
-                    // 当前先失败关闭；手动 Deposit Wallet merge/redeem 走账户服务。
-                    logger.warn(
-                        "自动链上跟随尚未开放，已安全跳过: copyTradingId={}, action={}, tradeId={}",
-                        copyTrading.id, trade.side, trade.id
+                try {
+                    if (copyTrading.executionMode == "PAPER") {
+                        copySimulationService.process(copyTrading, trade).getOrThrow()
+                    } else {
+                        copyLiveSettlementService.process(copyTrading, trade).getOrThrow()
+                    }
+                } catch (e: Exception) {
+                    failures += "copyTradingId=${copyTrading.id}: ${e.message}"
+                    logger.error(
+                        "处理结算事件失败: copyTradingId={}, action={}, tradeId={}",
+                        copyTrading.id, trade.side, trade.id, e
                     )
                 }
             }
-            Result.success(Unit)
+            if (failures.isEmpty()) Result.success(Unit)
+            else Result.failure(IllegalStateException(failures.joinToString("; ")))
         } catch (e: Exception) {
             Result.failure(e)
         }

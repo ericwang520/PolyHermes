@@ -108,6 +108,7 @@ class CopyTradingControllerTest {
         copyTradingService = copyTradingService,
         filteredOrderService = mock(),
         copySimulationService = mock(),
+        copySimulationReplayService = mock(),
         messageSource = StaticMessageSource()
     )
 

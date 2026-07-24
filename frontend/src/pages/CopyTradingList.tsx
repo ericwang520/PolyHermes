@@ -198,6 +198,34 @@ const CopyTradingList: React.FC = () => {
       }
     })
   }
+
+  const rebuildSimulation = (copyTradingId: number) => {
+    Modal.confirm({
+      title: '從 Leader 歷史重建模擬帳本？',
+      content: '系統會先完整下載 TRADE、MERGE、REDEEM，再清除舊帳本並按時間順序重播。處理期間請勿重複操作。',
+      okText: '確認重建',
+      cancelText: '取消',
+      onOk: async () => {
+        setLoadingStatistics(prev => new Set(prev).add(copyTradingId))
+        try {
+          const response = await apiService.copyTrading.rebuildSimulation({ copyTradingId })
+          if (response.data.code !== 0) {
+            throw new Error(response.data.msg || '重建模擬帳本失敗')
+          }
+          if (response.data.data) {
+            setSimulationMap(prev => ({ ...prev, [copyTradingId]: response.data.data as CopySimulationSummary }))
+          }
+          message.success('模擬帳本已按 Leader 完整歷史重建')
+        } finally {
+          setLoadingStatistics(prev => {
+            const next = new Set(prev)
+            next.delete(copyTradingId)
+            return next
+          })
+        }
+      }
+    })
+  }
   
   const getPnlColor = (value: string): string => {
     const num = parseFloat(value)
@@ -801,9 +829,18 @@ const CopyTradingList: React.FC = () => {
         open={simulationModalOpen}
         onCancel={() => setSimulationModalOpen(false)}
         footer={simulationModalCopyTradingId == null ? null : (
-          <Button danger onClick={() => resetSimulation(simulationModalCopyTradingId)}>
-            重置模擬帳本
-          </Button>
+          <Space>
+            <Button danger onClick={() => resetSimulation(simulationModalCopyTradingId)}>
+              清空模擬帳本
+            </Button>
+            <Button
+              type="primary"
+              loading={loadingStatistics.has(simulationModalCopyTradingId)}
+              onClick={() => rebuildSimulation(simulationModalCopyTradingId)}
+            >
+              從 Leader 歷史重建
+            </Button>
+          </Space>
         )}
         width={1000}
       >

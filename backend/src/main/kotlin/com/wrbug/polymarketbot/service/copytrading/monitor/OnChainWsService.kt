@@ -164,11 +164,22 @@ class OnChainWsService(
             )
 
             if (trade != null) {
-                logger.info("成功解析交易: leaderId=$leaderId, txHash=$txHash, side=${trade.side}, market=${trade.market}, size=${trade.size}")
+                val normalizedTrade = if (trade.side.uppercase() in setOf("MERGE", "REDEEM")) {
+                    trade.copy(
+                        id = SettlementActivityMapper.leaderTradeId(
+                            trade.side,
+                            txHash,
+                            trade.market
+                        )
+                    )
+                } else {
+                    trade
+                }
+                logger.info("成功解析交易: leaderId=$leaderId, txHash=$txHash, side=${normalizedTrade.side}, market=${normalizedTrade.market}, size=${normalizedTrade.size}")
                 // 调用 processTrade 处理交易
                 copyOrderTrackingService.processTrade(
                     leaderId = leaderId,
-                    trade = trade,
+                    trade = normalizedTrade,
                     source = "onchain-ws"
                 )
             } else {

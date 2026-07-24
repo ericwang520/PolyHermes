@@ -506,6 +506,12 @@ export const apiService = {
       apiClient.post<ApiResponse<any>>('/copy-trading/configs/simulation/summary', data),
     resetSimulation: (data: { copyTradingId: number }) =>
       apiClient.post<ApiResponse<any>>('/copy-trading/configs/simulation/reset', data),
+    rebuildSimulation: (data: { copyTradingId: number }) =>
+      apiClient.post<ApiResponse<any>>(
+        '/copy-trading/configs/simulation/rebuild',
+        data,
+        { timeout: 10 * 60 * 1000 }
+      ),
     
     /**
      * 更新跟单状态（兼容旧接口）

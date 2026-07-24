@@ -340,7 +340,17 @@ const EditModal: React.FC<EditModalProps> = ({
                 </Form.Item>
               </>
             ) : (
-              <Alert type="error" showIcon message="這是實盤配置，符合條件的下一筆事件可能建立真實訂單。" style={{ marginBottom: 16 }} />
+              <>
+                <Alert type="error" showIcon message="這是實盤配置，符合條件的下一筆事件可能建立真實訂單。" style={{ marginBottom: 16 }} />
+                <Form.Item
+                  label="跟隨鏈上 MERGE / REDEEM"
+                  name="followOnchainActions"
+                  valuePropName="checked"
+                  tooltip="預設關閉。啟用後，Leader MERGE 時只合併您的實際成對持倉；REDEEM 時只贖回您的實際可贖回持倉。"
+                >
+                  <Switch />
+                </Form.Item>
+              </>
             )}
           </Form.Item>
           
