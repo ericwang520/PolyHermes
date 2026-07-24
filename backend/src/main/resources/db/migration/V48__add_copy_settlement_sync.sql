@@ -13,7 +13,7 @@ CREATE TABLE copy_settlement_sync_cursor (
     last_timestamp BIGINT NOT NULL,
     updated_at BIGINT NOT NULL,
     CONSTRAINT fk_copy_settlement_cursor_leader
-        FOREIGN KEY (leader_id) REFERENCES leader(id) ON DELETE CASCADE
+        FOREIGN KEY (leader_id) REFERENCES copy_trading_leaders(id) ON DELETE CASCADE
 );
 
 CREATE TABLE copy_settlement_event (
@@ -36,5 +36,5 @@ CREATE TABLE copy_settlement_event (
     KEY idx_copy_settlement_pending (status, event_time),
     KEY idx_copy_settlement_leader_time (leader_id, event_time),
     CONSTRAINT fk_copy_settlement_event_leader
-        FOREIGN KEY (leader_id) REFERENCES leader(id) ON DELETE CASCADE
+        FOREIGN KEY (leader_id) REFERENCES copy_trading_leaders(id) ON DELETE CASCADE
 );
