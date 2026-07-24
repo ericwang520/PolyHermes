@@ -48,7 +48,11 @@ class CopySimulationReplayService(
             "开始重建模拟账本: copyTradingId={}, start={}, activityCount={}",
             copyTradingId, replayStart, activities.size
         )
-        if (config.enabled) {
+        // Keep the original flag separately. save/merge may update the managed
+        // entity instance, so reading config.enabled again in finally can leave
+        // a previously enabled PAPER configuration paused after rebuilding.
+        val wasEnabled = config.enabled
+        if (wasEnabled) {
             copyTradingRepository.save(config.copy(enabled = false, updatedAt = System.currentTimeMillis()))
             // Allow an already-running websocket handler to leave its transaction.
             delay(1000)
@@ -65,7 +69,7 @@ class CopySimulationReplayService(
             )
             replay(config, catchUp)
         } finally {
-            if (config.enabled) {
+            if (wasEnabled) {
                 copyTradingRepository.save(config.copy(enabled = true, updatedAt = System.currentTimeMillis()))
             }
         }
