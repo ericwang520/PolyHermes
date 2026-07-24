@@ -6,6 +6,7 @@ import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.POST
+import retrofit2.http.Path
 import retrofit2.http.Query
 
 /**
@@ -41,6 +42,22 @@ interface BuilderRelayerApi {
         @Query("address") address: String,
         @Query("type") type: String
     ): Response<NoncePayload>
+
+    @GET("/v1/account/transactions/params")
+    suspend fun getWalletNonce(
+        @Query("address") address: String,
+        @Query("type") type: String = "WALLET"
+    ): Response<NoncePayload>
+
+    @GET("/v1/account/transactions/{transactionId}")
+    suspend fun getWalletTransaction(
+        @Path("transactionId") transactionId: String
+    ): Response<WalletRelayerTransaction>
+
+    @POST("/submit")
+    suspend fun submitDepositWalletBatch(
+        @Body request: DepositWalletTransactionRequest
+    ): Response<RelayerTransactionResponse>
 
     /**
      * 获取 Relay Payload（PROXY 类型执行时使用）
@@ -177,6 +194,52 @@ interface BuilderRelayerApi {
         val nonce: String
     )
 
+    data class DepositWalletCall(
+        @SerializedName("target")
+        val target: String,
+        @SerializedName("value")
+        val value: String = "0",
+        @SerializedName("data")
+        val data: String
+    )
+
+    data class DepositWalletParams(
+        @SerializedName("depositWallet")
+        val depositWallet: String,
+        @SerializedName("deadline")
+        val deadline: String,
+        @SerializedName("calls")
+        val calls: List<DepositWalletCall>
+    )
+
+    data class DepositWalletTransactionRequest(
+        @SerializedName("type")
+        val type: String = "WALLET",
+        @SerializedName("from")
+        val from: String,
+        @SerializedName("to")
+        val to: String,
+        @SerializedName("nonce")
+        val nonce: String,
+        @SerializedName("signature")
+        val signature: String,
+        @SerializedName("metadata")
+        val metadata: String,
+        @SerializedName("depositWalletParams")
+        val depositWalletParams: DepositWalletParams
+    )
+
+    data class WalletRelayerTransaction(
+        @SerializedName("transaction_id")
+        val transactionId: String,
+        @SerializedName("transaction_hash")
+        val transactionHash: String?,
+        @SerializedName("state")
+        val state: String,
+        @SerializedName("error_msg")
+        val errorMessage: String?
+    )
+
     /**
      * Relay Payload（PROXY 执行时获取 relay 地址与 nonce）
      * 参考: builder-relayer-client types RelayPayload
@@ -196,7 +259,7 @@ interface BuilderRelayerApi {
         val transactionID: String,
         
         @SerializedName("transactionHash")
-        val transactionHash: String,
+        val transactionHash: String?,
         
         @SerializedName("from")
         val from: String,
@@ -240,4 +303,3 @@ interface BuilderRelayerApi {
         val deployed: Boolean
     )
 }
-

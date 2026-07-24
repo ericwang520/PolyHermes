@@ -1,0 +1,8 @@
+- [x] 1. 新增迁移、execution mode 与模拟账本实体/Repository。
+- [x] 2. 扩展跟单 DTO、服务与前端表单，PAPER 模式不要求账户交易凭据。
+- [x] 3. 实现模拟 BUY/SELL、持仓、PnL、幂等和查询接口。
+- [x] 4. 扩展 activity 类型并修复 MERGE/REDEEM 被误判为 SELL。
+- [x] 5. 实现 Deposit Wallet WALLET nonce、EIP-712 Batch 签名和提交。
+- [x] 6. 将手动 redeem 接入 Deposit Wallet batch；实现 merge calldata 构建。
+- [x] 7. 增加单元/集成测试，证明 PAPER 不触发真实交易。
+- [x] 8. 完成后端与前端构建并记录 AWS 重新部署命令。

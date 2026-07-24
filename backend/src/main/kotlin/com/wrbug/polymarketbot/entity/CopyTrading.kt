@@ -22,6 +22,15 @@ data class CopyTrading(
     
     @Column(name = "enabled", nullable = false)
     val enabled: Boolean = true,  // 是否启用
+
+    @Column(name = "execution_mode", nullable = false, length = 10)
+    val executionMode: String = "LIVE",  // LIVE=实盘，PAPER=模拟
+
+    @Column(name = "follow_onchain_actions", nullable = false)
+    val followOnchainActions: Boolean = false,  // 实盘跟随 MERGE/REDEEM，默认关闭
+
+    @Column(name = "paper_initial_balance", nullable = false, precision = 20, scale = 8)
+    val paperInitialBalance: BigDecimal = "1000".toSafeBigDecimal(),
     
     // 跟单配置参数
     @Column(name = "copy_mode", nullable = false, length = 10)
@@ -109,4 +118,3 @@ data class CopyTrading(
     @Column(name = "updated_at", nullable = false)
     var updatedAt: Long = System.currentTimeMillis()
 )
-

@@ -18,6 +18,7 @@ import java.util.concurrent.ConcurrentHashMap
 import com.wrbug.polymarketbot.service.copytrading.configs.CopyTradingFilterService
 import com.wrbug.polymarketbot.service.copytrading.configs.FilterStatus
 import com.wrbug.polymarketbot.service.copytrading.orders.OrderSigningService
+import com.wrbug.polymarketbot.service.copytrading.simulation.CopySimulationService
 import com.wrbug.polymarketbot.service.common.BlockchainService
 import com.wrbug.polymarketbot.service.common.MarketService
 import com.wrbug.polymarketbot.service.common.PolymarketClobService
@@ -52,6 +53,7 @@ open class CopyOrderTrackingService(
     private val retrofitFactory: RetrofitFactory,
     private val cryptoUtils: CryptoUtils,
     private val marketService: MarketService,  // 市场信息服务
+    private val copySimulationService: CopySimulationService,
     private val telegramNotificationService: TelegramNotificationService? = null  // 可选，避免循环依赖
 ) : ApplicationContextAware {
 
@@ -175,6 +177,11 @@ open class CopyOrderTrackingService(
                 val result = when (trade.side.uppercase()) {
                     "BUY" -> self.processBuyTrade(leaderId, trade, source)
                     "SELL" -> self.processSellTrade(leaderId, trade)
+                    "MERGE", "REDEEM" -> self.processSettlementTrade(leaderId, trade)
+                    "SETTLEMENT_UNKNOWN" -> {
+                        logger.warn("跳过无法可靠分类的链上结算事件: leaderId=$leaderId, tradeId=${trade.id}")
+                        Result.success(Unit)
+                    }
                     else -> {
                         logger.warn("未知的交易方向: ${trade.side}")
                         Result.failure(IllegalArgumentException("未知的交易方向: ${trade.side}"))
@@ -259,6 +266,10 @@ open class CopyOrderTrackingService(
             // 2. 为每个跟单关系创建买入订单跟踪
             for (copyTrading in copyTradings) {
                 try {
+                    if (copyTrading.executionMode == "PAPER") {
+                        copySimulationService.process(copyTrading, trade).getOrThrow()
+                        continue
+                    }
                     // 获取账户
                     val account = accountRepository.findById(copyTrading.accountId).orElse(null)
                         ?: continue
@@ -709,6 +720,10 @@ open class CopyOrderTrackingService(
             // 2. 为每个跟单关系处理卖出匹配
             for (copyTrading in copyTradings) {
                 try {
+                    if (copyTrading.executionMode == "PAPER") {
+                        copySimulationService.process(copyTrading, trade).getOrThrow()
+                        continue
+                    }
                     // 检查是否支持卖出
                     if (!copyTrading.supportSell) {
                         continue
@@ -725,6 +740,32 @@ open class CopyOrderTrackingService(
             Result.success(Unit)
         } catch (e: Exception) {
             logger.error("处理卖出交易异常: leaderId=$leaderId, tradeId=${trade.id}", e)
+            Result.failure(e)
+        }
+    }
+
+    @Transactional
+    suspend fun processSettlementTrade(leaderId: Long, trade: TradeResponse): Result<Unit> {
+        return try {
+            copyTradingRepository.findByLeaderIdAndEnabledTrue(leaderId).forEach { copyTrading ->
+                if (copyTrading.executionMode == "PAPER") {
+                    copySimulationService.process(copyTrading, trade).getOrThrow()
+                } else if (!copyTrading.followOnchainActions) {
+                    logger.info(
+                        "实盘链上跟随未启用，跳过: copyTradingId={}, action={}, tradeId={}",
+                        copyTrading.id, trade.side, trade.id
+                    )
+                } else {
+                    // 自动链上跟随需要按 follower 自有持仓缩放，不能照抄 leader 数量。
+                    // 当前先失败关闭；手动 Deposit Wallet merge/redeem 走账户服务。
+                    logger.warn(
+                        "自动链上跟随尚未开放，已安全跳过: copyTradingId={}, action={}, tradeId={}",
+                        copyTrading.id, trade.side, trade.id
+                    )
+                }
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
             Result.failure(e)
         }
     }

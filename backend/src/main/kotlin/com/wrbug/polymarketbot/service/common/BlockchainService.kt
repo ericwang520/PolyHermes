@@ -652,7 +652,7 @@ class BlockchainService(
      * @param proxyAddress 代理地址（Safe 或 Magic 代理钱包地址）
      * @param conditionId 市场条件ID（bytes32，必须是 0x 开头的 66 位十六进制字符串）
      * @param indexSets 要赎回的索引集合列表（每个元素是 2^outcomeIndex）
-     * @param isNegRisk 是否为 Neg Risk 市场（true 时使用 WrappedCollateral 作为抵押品）
+     * @param isNegRisk 是否为 Neg Risk 市场（决定使用哪个 Collateral Adapter）
      * @param walletType 钱包类型：MAGIC 或 SAFE，用于选择执行路径
      * @return 交易哈希
      */
@@ -676,9 +676,52 @@ class BlockchainService(
             }
 
             val redeemTx = relayClientService.createRedeemTx(conditionId, indexSets, isNegRisk)
+            if (walletType == WalletType.DEPOSIT) {
+                return relayClientService.executeDepositWalletBatch(
+                    privateKey = privateKey,
+                    depositWalletAddress = proxyAddress,
+                    transactions = listOf(
+                        relayClientService.createCtfAdapterApprovalTx(isNegRisk),
+                        redeemTx
+                    ),
+                    metadata = "Redeem positions"
+                )
+            }
             relayClientService.execute(privateKey, proxyAddress, redeemTx, walletType)
         } catch (e: Exception) {
             logger.error("赎回仓位失败: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun mergePositions(
+        privateKey: String,
+        proxyAddress: String,
+        conditionId: String,
+        amountRaw: BigInteger,
+        isNegRisk: Boolean = false,
+        walletType: WalletType = WalletType.SAFE
+    ): Result<String> {
+        return try {
+            require(conditionId.matches(Regex("^0x[0-9a-fA-F]{64}$"))) {
+                "conditionId 格式错误"
+            }
+            require(amountRaw > BigInteger.ZERO) { "合并数量必须大于 0" }
+            val mergeTx = relayClientService.createMergeTx(conditionId, amountRaw, isNegRisk)
+            if (walletType == WalletType.DEPOSIT) {
+                return relayClientService.executeDepositWalletBatch(
+                    privateKey = privateKey,
+                    depositWalletAddress = proxyAddress,
+                    transactions = listOf(
+                        relayClientService.createCtfAdapterApprovalTx(isNegRisk),
+                        mergeTx
+                    ),
+                    metadata = "Merge positions"
+                )
+            }
+            relayClientService.execute(privateKey, proxyAddress, mergeTx, walletType)
+        } catch (e: Exception) {
+            logger.error("合并仓位失败: ${e.message}", e)
             Result.failure(e)
         }
     }

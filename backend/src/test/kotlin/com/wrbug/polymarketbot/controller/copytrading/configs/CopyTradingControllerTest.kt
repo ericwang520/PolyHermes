@@ -107,6 +107,7 @@ class CopyTradingControllerTest {
     private fun controller(copyTradingService: CopyTradingService) = CopyTradingController(
         copyTradingService = copyTradingService,
         filteredOrderService = mock(),
+        copySimulationService = mock(),
         messageSource = StaticMessageSource()
     )
 

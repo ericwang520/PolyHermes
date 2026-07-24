@@ -132,6 +132,7 @@ class AccountOnChainMonitorService(
             // 解析 receipt 中的 Transfer 日志
             val logs = receiptJson.getAsJsonArray("logs") ?: return
             val (erc20Transfers, erc1155Transfers) = OnChainWsUtils.parseReceiptTransfers(logs)
+            val settlementAction = OnChainWsUtils.detectSettlementAction(logs)
             
             // 解析交易信息
             val trade = OnChainWsUtils.parseTradeFromTransfers(
@@ -140,7 +141,8 @@ class AccountOnChainMonitorService(
                 walletAddress = account.proxyAddress,
                 erc20Transfers = erc20Transfers,
                 erc1155Transfers = erc1155Transfers,
-                retrofitFactory = retrofitFactory
+                retrofitFactory = retrofitFactory,
+                settlementAction = settlementAction
             )
             
             if (trade != null && trade.side == "SELL") {

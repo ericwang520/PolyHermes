@@ -572,6 +572,23 @@ class AccountController(
         }
     }
 
+    @PostMapping("/positions/merge")
+    fun mergePositions(
+        @RequestBody request: PositionMergeRequest
+    ): ResponseEntity<ApiResponse<PositionMergeResponse>> {
+        if (request.accountId <= 0 || request.marketId.isBlank() || request.quantity.toSafeBigDecimal() <= BigDecimal.ZERO) {
+            return ResponseEntity.ok(ApiResponse.error(ErrorCode.PARAM_ERROR, "合并参数无效", messageSource))
+        }
+        val result = runBlocking { accountService.mergePositions(request) }
+        return result.fold(
+            onSuccess = { ResponseEntity.ok(ApiResponse.success(it)) },
+            onFailure = {
+                logger.error("合并仓位失败: ${it.message}", it)
+                ResponseEntity.ok(ApiResponse.error(ErrorCode.BUSINESS_ERROR, it.message, messageSource))
+            }
+        )
+    }
+
     /**
      * 将 USDC.e wrap 为 pUSD（V2 迁移）
      */
@@ -621,4 +638,3 @@ class AccountController(
     }
 
 }
-

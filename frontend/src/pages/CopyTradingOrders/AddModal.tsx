@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react'
-import { Modal, Form, Button, Switch, message, Space, Radio, InputNumber, Table, Select, Divider, Input, Tag, InputRef, Card, Row, Col, Statistic, Spin } from 'antd'
+import { Modal, Form, Button, Switch, message, Space, Radio, InputNumber, Table, Select, Divider, Input, Tag, InputRef, Card, Row, Col, Statistic, Spin, Alert } from 'antd'
 import { SaveOutlined, FileTextOutlined, PlusOutlined } from '@ant-design/icons'
 import { apiService } from '../../services/api'
 import { useAccountStore } from '../../store/accountStore'
@@ -167,6 +167,8 @@ const AddModal: React.FC<AddModalProps> = ({
       const defaultConfigName = generateDefaultConfigName()
         form.setFieldsValue({
           configName: defaultConfigName,
+          executionMode: 'PAPER',
+          paperInitialBalance: 49.55,
           copyMode: 'RATIO',
           copyRatio: 100,
           maxOrderSize: 1000,
@@ -336,6 +338,9 @@ const AddModal: React.FC<AddModalProps> = ({
         accountId: values.accountId,
         leaderId: values.leaderId,
         enabled: true, // 默认启用
+        executionMode: values.executionMode || 'PAPER',
+        followOnchainActions: values.executionMode === 'LIVE' ? Boolean(values.followOnchainActions) : false,
+        paperInitialBalance: values.paperInitialBalance?.toString() || '49.55',
         copyMode: values.copyMode || 'RATIO',
         copyRatio: values.copyMode === 'RATIO' && values.copyRatio ? (values.copyRatio / 100).toString() : undefined,
         fixedAmount: values.copyMode === 'FIXED' ? values.fixedAmount?.toString() : undefined,
@@ -400,6 +405,8 @@ const AddModal: React.FC<AddModalProps> = ({
           layout="vertical"
           onFinish={handleSubmit}
           initialValues={{
+            executionMode: 'PAPER',
+            paperInitialBalance: 49.55,
             copyMode: 'RATIO',
             copyRatio: 100,
             maxOrderSize: 1000,
@@ -432,6 +439,55 @@ const AddModal: React.FC<AddModalProps> = ({
               placeholder={t('copyTradingAdd.configNamePlaceholder') || '例如：跟单配置1'} 
               maxLength={255}
             />
+          </Form.Item>
+
+          <Form.Item
+            label="執行模式"
+            name="executionMode"
+            rules={[{ required: true }]}
+          >
+            <Radio.Group buttonStyle="solid">
+              <Radio.Button value="PAPER">模擬跟單（推薦）</Radio.Button>
+              <Radio.Button value="LIVE">實盤跟單</Radio.Button>
+            </Radio.Group>
+          </Form.Item>
+
+          <Form.Item noStyle shouldUpdate={(prev, current) => prev.executionMode !== current.executionMode}>
+            {({ getFieldValue }) => getFieldValue('executionMode') === 'PAPER' ? (
+              <>
+                <Alert
+                  type="info"
+                  showIcon
+                  message="模擬模式不會送出訂單，也不會使用私鑰或 API Key。"
+                  style={{ marginBottom: 16 }}
+                />
+                <Form.Item
+                  label="模擬初始資金（USDC）"
+                  name="paperInitialBalance"
+                  rules={[{ required: true }, { type: 'number', min: 1 }]}
+                >
+                  <InputNumber min={1} precision={2} style={{ width: '100%' }} />
+                </Form.Item>
+              </>
+            ) : (
+              <>
+                <Alert
+                  type="error"
+                  showIcon
+                  message="實盤模式會建立真實訂單並可能損失資金。"
+                  style={{ marginBottom: 16 }}
+                />
+                <Form.Item
+                  label="跟隨鏈上 MERGE / REDEEM"
+                  name="followOnchainActions"
+                  valuePropName="checked"
+                  initialValue={false}
+                  tooltip="高風險功能，預設關閉；目前自動鏈上跟隨仍會安全跳過。"
+                >
+                  <Switch disabled />
+                </Form.Item>
+              </>
+            )}
           </Form.Item>
           
           <Form.Item
@@ -1154,4 +1210,3 @@ const AddModal: React.FC<AddModalProps> = ({
 }
 
 export default AddModal
-

@@ -267,6 +267,9 @@ export interface CopyTrading {
   leaderName?: string
   leaderAddress: string
   enabled: boolean
+  executionMode: 'LIVE' | 'PAPER'
+  followOnchainActions: boolean
+  paperInitialBalance: string
   // 跟单配置参数
   copyMode: 'RATIO' | 'FIXED'
   copyRatio: string
@@ -306,6 +309,52 @@ export interface CopyTrading {
 export interface CopyTradingListResponse {
   list: CopyTrading[]
   total: number
+}
+
+export interface CopySimulationTrade {
+  id: number
+  leaderTradeId: string
+  action: 'BUY' | 'SELL' | 'MERGE' | 'REDEEM'
+  marketId: string
+  outcomeIndex?: number
+  price?: string
+  quantity: string
+  notional: string
+  realizedPnl: string
+  status: string
+  reason?: string
+  fillAssumption: string
+  eventTime: number
+}
+
+export interface CopySimulationPosition {
+  marketId: string
+  outcomeIndex: number
+  tokenId?: string
+  quantity: string
+  averageCost: string
+  lastPrice?: string
+  marketValue?: string
+  unrealizedPnl?: string
+  realizedPnl: string
+  valuationStatus: string
+}
+
+export interface CopySimulationSummary {
+  copyTradingId: number
+  initialCash: string
+  cashBalance: string
+  positionValue?: string
+  equity?: string
+  realizedPnl: string
+  unrealizedPnl?: string
+  totalPnl?: string
+  totalFees: string
+  tradeCount: number
+  status: string
+  positions: CopySimulationPosition[]
+  trades: CopySimulationTrade[]
+  updatedAt: number
 }
 
 export type LeaderPoolStatus = 'CANDIDATE' | 'WATCH' | 'PAPER' | 'TRIAL' | 'ACTIVE' | 'COOLDOWN' | 'RETIRED'
@@ -630,6 +679,9 @@ export interface CopyTradingCreateRequest {
   accountId: number
   leaderId: number
   enabled?: boolean
+  executionMode?: 'LIVE' | 'PAPER'
+  followOnchainActions?: boolean
+  paperInitialBalance?: string
   // 跟单配置参数
   copyMode?: 'RATIO' | 'FIXED'
   copyRatio?: string
@@ -668,6 +720,9 @@ export interface CopyTradingCreateRequest {
 export interface CopyTradingUpdateRequest {
   copyTradingId: number
   enabled?: boolean
+  executionMode?: 'LIVE' | 'PAPER'
+  followOnchainActions?: boolean
+  paperInitialBalance?: string
   // 跟单配置参数（可选，只更新提供的字段）
   copyMode?: 'RATIO' | 'FIXED'
   copyRatio?: string

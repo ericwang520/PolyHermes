@@ -51,6 +51,10 @@ class RelayClientService(
     // Neg Risk 市场使用的 WrappedCollateral 合约地址（Polygon，neg-risk-ctf-adapter）
     private val negRiskWrappedCollateralAddress = "0x3A3BD7bb9528E159577F7C2e685CC81A765002E2"
 
+    // 新版 pUSD 仓位操作必须通过 Collateral Adapter。
+    private val ctfCollateralAdapterAddress = "0xAdA100Db00Ca00073811820692005400218FcE1f"
+    private val negRiskCtfCollateralAdapterAddress = "0xadA2005600Dec949baf300f4C6120000bDB6eAab"
+
     // 空集合ID
     private val EMPTY_SET = "0x0000000000000000000000000000000000000000000000000000000000000000"
 
@@ -68,6 +72,8 @@ class RelayClientService(
     private val RELAYER_TYPE_PROXY = "PROXY"
     private val RELAYER_TYPE_SAFE = "SAFE"
     private val RELAYER_TYPE_SAFE_CREATE = "SAFE-CREATE"
+    private val RELAYER_TYPE_WALLET = "WALLET"
+    private val depositWalletFactoryAddress = "0x00000000000Fb5C9ADea0298D729A0CB3823Cc07"
 
     // Safe 代理工厂（用于 SAFE-CREATE 部署）
     private val safeProxyFactoryAddress = PolymarketConstants.SAFE_PROXY_FACTORY_ADDRESS
@@ -246,11 +252,11 @@ class RelayClientService(
     /**
      * 创建赎回交易（支持多个 indexSets，用于批量赎回）
      * 参考 TypeScript: utils/redeem.ts 的 createRedeemTx
-     * Neg Risk 市场使用 WrappedCollateral 作为抵押品，需传 isNegRisk=true
+     * 新版 pUSD 市场通过 Collateral Adapter 操作；isNegRisk 决定 adapter 地址。
      *
      * @param conditionId 市场条件ID
      * @param indexSets 索引集合列表（每个元素是 2^outcomeIndex）
-     * @param isNegRisk 是否为 Neg Risk 市场（true 时使用 WrappedCollateral 地址）
+     * @param isNegRisk 是否为 Neg Risk 市场
      * @return Safe 交易对象
      */
     fun createRedeemTx(conditionId: String, indexSets: List<BigInteger>, isNegRisk: Boolean = false): SafeTransaction {
@@ -259,9 +265,7 @@ class RelayClientService(
             "redeemPositions(address,bytes32,bytes32,uint256[])"
         )
 
-        // Neg Risk 市场仓位由 WrappedCollateral 抵押，普通市场由 USDC 抵押
-        val collateralAddress = if (isNegRisk) negRiskWrappedCollateralAddress else usdcContractAddress
-        val encodedCollateral = EthereumUtils.encodeAddress(collateralAddress)
+        val encodedCollateral = EthereumUtils.encodeAddress(usdcContractAddress)
         val encodedParentCollection = EthereumUtils.encodeBytes32(EMPTY_SET)
         val encodedConditionId = EthereumUtils.encodeBytes32(conditionId)
 
@@ -282,9 +286,56 @@ class RelayClientService(
                 encodedArrayElements
 
         return SafeTransaction(
-            to = conditionalTokensAddress,
+            to = getCtfAdapterAddress(isNegRisk),
             operation = 0,  // CALL
             data = callData,
+            value = "0"
+        )
+    }
+
+    fun createMergeTx(
+        conditionId: String,
+        amountRaw: BigInteger,
+        isNegRisk: Boolean = false
+    ): SafeTransaction {
+        require(amountRaw > BigInteger.ZERO) { "merge amount 必须大于 0" }
+        val selector = EthereumUtils.getFunctionSelector(
+            "mergePositions(address,bytes32,bytes32,uint256[],uint256)"
+        )
+        val encodedCollateral = EthereumUtils.encodeAddress(usdcContractAddress)
+        val encodedParentCollection = EthereumUtils.encodeBytes32(EMPTY_SET)
+        val encodedConditionId = EthereumUtils.encodeBytes32(conditionId)
+        val encodedPartitionOffset = EthereumUtils.encodeUint256(BigInteger.valueOf(160))
+        val encodedAmount = EthereumUtils.encodeUint256(amountRaw)
+        val encodedPartitionLength = EthereumUtils.encodeUint256(BigInteger.TWO)
+        val encodedPartition = EthereumUtils.encodeUint256(BigInteger.ONE) +
+            EthereumUtils.encodeUint256(BigInteger.TWO)
+        return SafeTransaction(
+            to = getCtfAdapterAddress(isNegRisk),
+            operation = 0,
+            data = "0x" + selector.removePrefix("0x") +
+                encodedCollateral +
+                encodedParentCollection +
+                encodedConditionId +
+                encodedPartitionOffset +
+                encodedAmount +
+                encodedPartitionLength +
+                encodedPartition,
+            value = "0"
+        )
+    }
+
+    fun getCtfAdapterAddress(isNegRisk: Boolean): String =
+        if (isNegRisk) negRiskCtfCollateralAdapterAddress else ctfCollateralAdapterAddress
+
+    fun createCtfAdapterApprovalTx(isNegRisk: Boolean): SafeTransaction {
+        val selector = EthereumUtils.getFunctionSelector("setApprovalForAll(address,bool)")
+        val operator = EthereumUtils.encodeAddress(getCtfAdapterAddress(isNegRisk))
+        val approved = EthereumUtils.encodeUint256(BigInteger.ONE)
+        return SafeTransaction(
+            to = conditionalTokensAddress,
+            operation = 0,
+            data = "0x" + selector.removePrefix("0x") + operator + approved,
             value = "0"
         )
     }
@@ -451,10 +502,11 @@ class RelayClientService(
     ): Result<String> {
         return try {
             if (walletType == WalletType.DEPOSIT) {
-                return Result.failure(
-                    UnsupportedOperationException(
-                        "Deposit Wallet 链上操作需要 Builder Relayer WALLET batch；当前版本仅支持 POLY_1271 CLOB 交易"
-                    )
+                return executeDepositWalletBatch(
+                    privateKey = privateKey,
+                    depositWalletAddress = proxyAddress,
+                    transactions = listOf(safeTx),
+                    metadata = "PolyHermes Deposit Wallet action"
                 )
             }
             if (proxyAddress.isBlank() || !proxyAddress.startsWith("0x") || proxyAddress.length != 42) {
@@ -498,6 +550,149 @@ class RelayClientService(
             logger.error("执行交易失败: ${e.message}", e)
             Result.failure(e)
         }
+    }
+
+    suspend fun executeDepositWalletBatch(
+        privateKey: String,
+        depositWalletAddress: String,
+        transactions: List<SafeTransaction>,
+        metadata: String
+    ): Result<String> {
+        return try {
+            require(transactions.isNotEmpty()) { "Deposit Wallet transactions 不能为空" }
+            require(depositWalletAddress.matches(Regex("^0x[0-9a-fA-F]{40}$"))) {
+                "depositWalletAddress 格式错误"
+            }
+            require(transactions.all { it.operation == 0 }) {
+                "Deposit Wallet WALLET batch 只接受普通 CALL，不能使用 Safe DelegateCall"
+            }
+            val builderApiKey = systemConfigService.getBuilderApiKey()
+            val builderSecret = systemConfigService.getBuilderSecret()
+            val builderPassphrase = systemConfigService.getBuilderPassphrase()
+            if (!isBuilderRelayerEnabled(builderApiKey, builderSecret, builderPassphrase)) {
+                return Result.failure(IllegalStateException("Deposit Wallet 链上操作必须配置 Builder API Key"))
+            }
+            val relayerApi = retrofitFactory.createBuilderRelayerApi(
+                PolymarketConstants.BUILDER_RELAYER_URL,
+                builderApiKey!!,
+                builderSecret!!,
+                builderPassphrase!!
+            )
+            val key = BigInteger(privateKey.removePrefix("0x"), 16)
+            val credentials = org.web3j.crypto.Credentials.create(key.toString(16))
+            val signerAddress = credentials.address
+            val nonceResponse = withBuilderRelayerRateLimitRetry {
+                relayerApi.getWalletNonce(signerAddress, RELAYER_TYPE_WALLET)
+            }
+            if (!nonceResponse.isSuccessful || nonceResponse.body() == null) {
+                val errorBody = nonceResponse.errorBody()?.string() ?: "未知错误"
+                updateQuotaBlockedFromErrorBody(errorBody)
+                return Result.failure(
+                    Exception("获取 Deposit Wallet nonce 失败: ${nonceResponse.code()} - $errorBody")
+                )
+            }
+            val nonce = BigInteger(nonceResponse.body()!!.nonce)
+            val deadline = BigInteger.valueOf(System.currentTimeMillis() / 1000 + 240)
+            val calls = transactions.map {
+                BuilderRelayerApi.DepositWalletCall(
+                    target = it.to,
+                    value = it.value,
+                    data = it.data
+                )
+            }
+            val domain = Eip712Encoder.encodeDepositWalletDomain(137L, depositWalletAddress)
+            val batchHash = Eip712Encoder.encodeDepositWalletBatch(
+                depositWalletAddress, nonce, deadline, calls
+            )
+            val digest = Eip712Encoder.hashStructuredData(domain, batchHash)
+            val signature = signatureToStandardHex(
+                org.web3j.crypto.Sign.signMessage(
+                    digest,
+                    org.web3j.crypto.ECKeyPair.create(key),
+                    false
+                )
+            )
+            val request = BuilderRelayerApi.DepositWalletTransactionRequest(
+                from = signerAddress,
+                to = depositWalletFactoryAddress,
+                nonce = nonce.toString(),
+                signature = signature,
+                metadata = metadata.take(500),
+                depositWalletParams = BuilderRelayerApi.DepositWalletParams(
+                    depositWallet = depositWalletAddress,
+                    deadline = deadline.toString(),
+                    calls = calls
+                )
+            )
+            val response = withBuilderRelayerRateLimitRetry {
+                relayerApi.submitDepositWalletBatch(request)
+            }
+            if (!response.isSuccessful || response.body() == null) {
+                val errorBody = response.errorBody()?.string() ?: "未知错误"
+                updateQuotaBlockedFromErrorBody(errorBody)
+                return Result.failure(
+                    Exception("Deposit Wallet batch 提交失败: ${response.code()} - $errorBody")
+                )
+            }
+            waitForDepositWalletRelayerResult(relayerApi, response.body()!!.transactionID)
+        } catch (e: Exception) {
+            logger.error("Deposit Wallet batch 执行失败: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    private suspend fun waitForRelayerResult(
+        relayerApi: BuilderRelayerApi,
+        transactionId: String,
+        maxAttempts: Int = 40
+    ): Result<String> {
+        repeat(maxAttempts) {
+            val response = withBuilderRelayerRateLimitRetry { relayerApi.getTransaction(transactionId) }
+            if (response.isSuccessful) {
+                val tx = response.body()?.firstOrNull()
+                when (tx?.state) {
+                    "STATE_CONFIRMED", "STATE_MINED", "STATE_EXECUTED" -> {
+                        if (!tx.transactionHash.isNullOrBlank()) return Result.success(tx.transactionHash)
+                    }
+                    "STATE_FAILED", "STATE_INVALID" ->
+                        return Result.failure(Exception("Relayer 交易失败: ${tx.state}, id=$transactionId"))
+                }
+            }
+            delay(1_500)
+        }
+        return Result.failure(Exception("等待 Relayer 交易确认超时: id=$transactionId"))
+    }
+
+    private suspend fun waitForDepositWalletRelayerResult(
+        relayerApi: BuilderRelayerApi,
+        transactionId: String,
+        maxAttempts: Int = 40
+    ): Result<String> {
+        repeat(maxAttempts) {
+            val response = withBuilderRelayerRateLimitRetry {
+                relayerApi.getWalletTransaction(transactionId)
+            }
+            if (response.isSuccessful) {
+                val tx = response.body()
+                when (tx?.state) {
+                    "STATE_CONFIRMED" -> {
+                        if (!tx.transactionHash.isNullOrBlank()) {
+                            return Result.success(tx.transactionHash)
+                        }
+                    }
+                    "STATE_FAILED", "STATE_INVALID" -> {
+                        return Result.failure(
+                            Exception(
+                                "Deposit Wallet Relayer 交易失败: ${tx.state}, " +
+                                    "error=${tx.errorMessage ?: "未知"}, id=$transactionId"
+                            )
+                        )
+                    }
+                }
+            }
+            delay(1_500)
+        }
+        return Result.failure(Exception("等待 Deposit Wallet Relayer 确认超时: id=$transactionId"))
     }
 
     /**

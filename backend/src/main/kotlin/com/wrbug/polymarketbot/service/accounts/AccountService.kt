@@ -1636,23 +1636,14 @@ class AccountService(
                 accounts[accountId] = account
             }
 
-            if (accounts.values.any {
-                    WalletType.fromStringOrDefault(it.walletType, WalletType.SAFE) == WalletType.DEPOSIT
-                }) {
-                return Result.failure(
-                    UnsupportedOperationException(
-                        "Deposit Wallet 赎回需要 Builder Relayer WALLET batch；当前版本仅支持其 CLOB 买卖"
-                    )
-                )
+            // 4. Magic 与 Deposit Wallet 都依赖 Builder Relayer（提前判断，避免深层失败）
+            val requiresBuilderRelayer = accounts.values.any {
+                val type = WalletType.fromStringOrDefault(it.walletType, WalletType.SAFE)
+                type == WalletType.MAGIC || type == WalletType.DEPOSIT
             }
-
-            // 4. 若涉及 Magic 账户，必须已配置 Builder API Key（提前判断，避免执行到深层再报错）
-            val hasMagicAccount = accounts.values.any { 
-                WalletType.fromStringOrDefault(it.walletType, WalletType.SAFE) == WalletType.MAGIC 
-            }
-            if (hasMagicAccount && !relayClientService.isBuilderApiKeyConfigured()) {
+            if (requiresBuilderRelayer && !relayClientService.isBuilderApiKeyConfigured()) {
                 return Result.failure(
-                    IllegalStateException("Builder API Key 未配置，无法执行 Magic 账户赎回（Gasless）。请前往系统设置页面配置 Builder API Key。")
+                    IllegalStateException("Builder API Key 未配置，无法执行 Magic/Deposit Wallet 赎回。请前往系统设置页面配置 Builder API Key。")
                 )
             }
 
@@ -1859,6 +1850,49 @@ class AccountService(
             )
         } catch (e: Exception) {
             logger.error("赎回仓位异常: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun mergePositions(request: PositionMergeRequest): Result<PositionMergeResponse> {
+        return try {
+            val account = accountRepository.findById(request.accountId).orElse(null)
+                ?: return Result.failure(IllegalArgumentException("账户不存在"))
+            if (!account.isEnabled) {
+                return Result.failure(IllegalStateException("账户未启用"))
+            }
+            val quantity = request.quantity.toSafeBigDecimal()
+            if (quantity <= BigDecimal.ZERO) {
+                return Result.failure(IllegalArgumentException("合并数量必须大于 0"))
+            }
+            val walletType = WalletType.fromStringOrDefault(account.walletType, WalletType.SAFE)
+            if ((walletType == WalletType.MAGIC || walletType == WalletType.DEPOSIT) &&
+                !relayClientService.isBuilderApiKeyConfigured()
+            ) {
+                return Result.failure(IllegalStateException("Builder API Key 未配置，无法执行合并"))
+            }
+            val amountRaw = quantity.movePointRight(6)
+                .setScale(0, java.math.RoundingMode.DOWN)
+                .toBigIntegerExact()
+            val isNegRisk = marketService.getNegRiskByConditionId(request.marketId) == true
+            val result = blockchainService.mergePositions(
+                privateKey = decryptPrivateKey(account),
+                proxyAddress = account.proxyAddress,
+                conditionId = request.marketId,
+                amountRaw = amountRaw,
+                isNegRisk = isNegRisk,
+                walletType = walletType
+            ).getOrThrow()
+            Result.success(
+                PositionMergeResponse(
+                    accountId = request.accountId,
+                    marketId = request.marketId,
+                    quantity = quantity.toPlainString(),
+                    transactionHash = result
+                )
+            )
+        } catch (e: Exception) {
+            logger.error("合并仓位失败: ${e.message}", e)
             Result.failure(e)
         }
     }

@@ -254,6 +254,19 @@ data class PositionRedeemRequest(
     val positions: List<AccountRedeemPositionItem>  // 要赎回的仓位列表（支持多账户）
 )
 
+data class PositionMergeRequest(
+    val accountId: Long,
+    val marketId: String,
+    val quantity: String
+)
+
+data class PositionMergeResponse(
+    val accountId: Long,
+    val marketId: String,
+    val quantity: String,
+    val transactionHash: String
+)
+
 /**
  * 账户赎回仓位项（包含账户ID）
  */

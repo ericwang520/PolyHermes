@@ -52,6 +52,9 @@ object OnChainWsUtils {
     const val ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
     const val ERC1155_TRANSFER_SINGLE_TOPIC = "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62"
     const val ERC1155_TRANSFER_BATCH_TOPIC = "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb"
+    const val POSITIONS_MERGE_TOPIC = "0x6f13ca62553fcc2bcd2372180a43949c1e4cebba603901ede2f4e14f36b282ca"
+    const val PAYOUT_REDEMPTION_TOPIC = "0x2682012a4a4f1973119f1c9b90745d1bd91fa2bab387344f044cb3586864d18d"
+    private const val ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
     
     /**
      * ERC20 Transfer 数据类
@@ -80,6 +83,41 @@ object OnChainWsUtils {
         val outcomeIndex: Int?,  // 可空，因为可能找不到对应的 tokenId
         val outcome: String?
     )
+
+    /**
+     * 对 CTF burn + 抵押品回流进行保守分类。
+     * 无法证明是单边赎回或等量双边合并时返回 SETTLEMENT_UNKNOWN，
+     * 让调用方停止自动实盘动作。
+     */
+    fun classifySettlement(
+        burnedById: Map<BigInteger, BigInteger>,
+        collateralIn: BigInteger
+    ): String? {
+        if (burnedById.isEmpty() || collateralIn <= BigInteger.ZERO) return null
+        val burned = burnedById.entries.sortedByDescending { it.value }
+        return when {
+            burned.size == 1 -> "REDEEM"
+            burned.map { it.value }.distinct().size == 1 && collateralIn == burned.first().value -> "MERGE"
+            else -> "SETTLEMENT_UNKNOWN"
+        }
+    }
+
+    /**
+     * 优先使用 CTF 合约事件精确区分 Merge 与 Redeem。
+     * 只有旧交易或缺少事件日志时才回退到 transfer 启发式。
+     */
+    fun detectSettlementAction(logs: JsonArray): String? {
+        for (logElement in logs) {
+            val log = logElement.asJsonObject
+            if (!log.get("address")?.asString.equals(ERC1155_CONTRACT, ignoreCase = true)) continue
+            val topic = log.getAsJsonArray("topics")?.firstOrNull()?.asString?.lowercase() ?: continue
+            when (topic) {
+                POSITIONS_MERGE_TOPIC -> return "MERGE"
+                PAYOUT_REDEMPTION_TOPIC -> return "REDEEM"
+            }
+        }
+        return null
+    }
     
     /**
      * 解析 receipt 中的 Transfer 日志
@@ -196,7 +234,8 @@ object OnChainWsUtils {
         walletAddress: String,
         erc20Transfers: List<Erc20Transfer>,
         erc1155Transfers: List<Erc1155Transfer>,
-        retrofitFactory: RetrofitFactory
+        retrofitFactory: RetrofitFactory,
+        settlementAction: String? = null
     ): TradeResponse? {
         val wallet = walletAddress.lowercase()
         
@@ -209,12 +248,16 @@ object OnChainWsUtils {
         // 计算 ERC1155 流入和流出（按 tokenId 聚合）
         val inById = mutableMapOf<BigInteger, BigInteger>()
         val outById = mutableMapOf<BigInteger, BigInteger>()
+        val burnedById = mutableMapOf<BigInteger, BigInteger>()
         for (t in erc1155Transfers) {
             if (t.to.lowercase() == wallet) {
                 inById[t.tokenId] = (inById[t.tokenId] ?: BigInteger.ZERO) + t.value
             }
             if (t.from.lowercase() == wallet) {
                 outById[t.tokenId] = (outById[t.tokenId] ?: BigInteger.ZERO) + t.value
+                if (t.to.equals(ZERO_ADDRESS, ignoreCase = true)) {
+                    burnedById[t.tokenId] = (burnedById[t.tokenId] ?: BigInteger.ZERO) + t.value
+                }
             }
         }
         
@@ -231,7 +274,17 @@ object OnChainWsUtils {
         var sizeRaw = BigInteger.ZERO
         var usdcRaw = BigInteger.ZERO
         
-        if (bestInId != null && bestInVal > BigInteger.ZERO && usdcOut > BigInteger.ZERO) {
+        if (burnedById.isNotEmpty() && usdcIn > BigInteger.ZERO) {
+            // CTF SELL 会把 token 转给交易对手；MERGE/REDEEM 会 burn token。
+            // 先于 SELL 分支分类，避免把结算误当成卖出跟单。
+            val burned = burnedById.entries.sortedByDescending { it.value }
+            asset = burned.first().key
+            sizeRaw = burned.minOf { it.value }
+            usdcRaw = usdcIn
+            side = settlementAction
+                ?: classifySettlement(burnedById, usdcIn)
+                ?: "SETTLEMENT_UNKNOWN"
+        } else if (bestInId != null && bestInVal > BigInteger.ZERO && usdcOut > BigInteger.ZERO) {
             // BUY: 收到 token，支付 USDC
             side = "BUY"
             asset = bestInId
@@ -440,4 +493,3 @@ object OnChainWsUtils {
         return BigInteger(1, slice)
     }
 }
-

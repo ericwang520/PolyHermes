@@ -8,6 +8,7 @@ import com.wrbug.polymarketbot.repository.AccountRepository
 import com.wrbug.polymarketbot.repository.CopyTradingRepository
 import com.wrbug.polymarketbot.repository.CopyTradingTemplateRepository
 import com.wrbug.polymarketbot.repository.LeaderRepository
+import com.wrbug.polymarketbot.enums.CopyExecutionMode
 import com.wrbug.polymarketbot.service.copytrading.monitor.CopyTradingMonitorService
 import com.google.gson.Gson
 import com.wrbug.polymarketbot.util.IllegalBigDecimal
@@ -72,6 +73,7 @@ class CopyTradingService(
             if (configName.isNullOrBlank()) {
                 return Result.failure(IllegalArgumentException("配置名不能为空"))
             }
+            val executionMode = CopyExecutionMode.parse(request.executionMode).name
             
             // 5. 获取配置参数（从模板填充或手动输入）
             val config = if (request.templateId != null) {
@@ -143,6 +145,11 @@ class CopyTradingService(
                 accountId = request.accountId,
                 leaderId = request.leaderId,
                 enabled = request.enabled,
+                executionMode = executionMode,
+                followOnchainActions = request.followOnchainActions,
+                paperInitialBalance = request.paperInitialBalance.toSafeBigDecimal().also {
+                    require(it > BigDecimal.ZERO) { "paperInitialBalance 必须大于 0" }
+                },
                 copyMode = config.copyMode,
                 copyRatio = config.copyRatio,
                 fixedAmount = config.fixedAmount,
@@ -214,6 +221,12 @@ class CopyTradingService(
             // 更新字段（只更新提供的字段）
             val updated = copyTrading.copy(
                 enabled = request.enabled ?: copyTrading.enabled,
+                executionMode = request.executionMode?.let { CopyExecutionMode.parse(it).name }
+                    ?: copyTrading.executionMode,
+                followOnchainActions = request.followOnchainActions ?: copyTrading.followOnchainActions,
+                paperInitialBalance = request.paperInitialBalance?.toSafeBigDecimal()?.also {
+                    require(it > BigDecimal.ZERO) { "paperInitialBalance 必须大于 0" }
+                } ?: copyTrading.paperInitialBalance,
                 copyMode = request.copyMode ?: copyTrading.copyMode,
                 copyRatio = request.copyRatio?.toSafeBigDecimal() ?: copyTrading.copyRatio,
                 fixedAmount = request.fixedAmount?.toSafeBigDecimal() ?: copyTrading.fixedAmount,
@@ -518,6 +531,9 @@ class CopyTradingService(
             leaderName = leader.leaderName,
             leaderAddress = leader.leaderAddress,
             enabled = copyTrading.enabled,
+            executionMode = copyTrading.executionMode,
+            followOnchainActions = copyTrading.followOnchainActions,
+            paperInitialBalance = copyTrading.paperInitialBalance.toPlainString(),
             copyMode = copyTrading.copyMode,
             copyRatio = copyTrading.copyRatio.toPlainString(),
             fixedAmount = copyTrading.fixedAmount?.toPlainString(),

@@ -171,6 +171,60 @@ object Eip712Encoder {
         
         return keccak256(encoded)
     }
+
+    fun encodeDepositWalletDomain(chainId: Long, verifyingContract: String): ByteArray {
+        val typeHash = encodeType(
+            "EIP712Domain",
+            listOf(
+                "name" to "string",
+                "version" to "string",
+                "chainId" to "uint256",
+                "verifyingContract" to "address"
+            )
+        )
+        return keccak256(
+            typeHash +
+                encodeString("DepositWallet") +
+                encodeString("1") +
+                encodeUint256(BigInteger.valueOf(chainId)) +
+                encodeAddress(verifyingContract)
+        )
+    }
+
+    fun encodeDepositWalletBatch(
+        wallet: String,
+        nonce: BigInteger,
+        deadline: BigInteger,
+        calls: List<com.wrbug.polymarketbot.api.BuilderRelayerApi.DepositWalletCall>
+    ): ByteArray {
+        require(calls.isNotEmpty()) { "Deposit Wallet calls 不能为空" }
+        val callTypeHash = keccak256(
+            "Call(address target,uint256 value,bytes data)".toByteArray(StandardCharsets.UTF_8)
+        )
+        val callHashes = calls.map { call ->
+            val dataBytes = Numeric.hexStringToByteArray(call.data)
+            keccak256(
+                callTypeHash +
+                    encodeAddress(call.target) +
+                    encodeUint256(BigInteger(call.value)) +
+                    keccak256(dataBytes)
+            )
+        }
+        val callsHash = keccak256(callHashes.fold(ByteArray(0)) { acc, hash -> acc + hash })
+        val batchTypeHash = keccak256(
+            (
+                "Batch(address wallet,uint256 nonce,uint256 deadline,Call[] calls)" +
+                    "Call(address target,uint256 value,bytes data)"
+                ).toByteArray(StandardCharsets.UTF_8)
+        )
+        return keccak256(
+            batchTypeHash +
+                encodeAddress(wallet) +
+                encodeUint256(nonce) +
+                encodeUint256(deadline) +
+                callsHash
+        )
+    }
     
     /**
      * 编码 ExchangeOrder V2 域分隔符

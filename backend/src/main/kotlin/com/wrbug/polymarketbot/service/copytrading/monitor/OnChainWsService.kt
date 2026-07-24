@@ -149,6 +149,7 @@ class OnChainWsService(
                 return
             }
             val (erc20Transfers, erc1155Transfers) = OnChainWsUtils.parseReceiptTransfers(logs)
+            val settlementAction = OnChainWsUtils.detectSettlementAction(logs)
             logger.debug("解析交易日志: leaderId=$leaderId, txHash=$txHash, erc20Transfers=${erc20Transfers.size}, erc1155Transfers=${erc1155Transfers.size}")
 
             // 解析交易信息
@@ -158,7 +159,8 @@ class OnChainWsService(
                 walletAddress = leader.leaderAddress,
                 erc20Transfers = erc20Transfers,
                 erc1155Transfers = erc1155Transfers,
-                retrofitFactory = retrofitFactory
+                retrofitFactory = retrofitFactory,
+                settlementAction = settlementAction
             )
 
             if (trade != null) {

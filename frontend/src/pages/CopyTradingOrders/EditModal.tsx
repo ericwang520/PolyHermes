@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react'
-import { Modal, Form, Button, message, Radio, InputNumber, Divider, Spin, Select, Input, Space, Switch, Tag, InputRef, Card, Row, Col, Statistic } from 'antd'
+import { Modal, Form, Button, message, Radio, InputNumber, Divider, Spin, Select, Input, Space, Switch, Tag, InputRef, Card, Row, Col, Statistic, Alert } from 'antd'
 import { SaveOutlined } from '@ant-design/icons'
 import { apiService } from '../../services/api'
 import type { CopyTrading, CopyTradingUpdateRequest } from '../../types'
@@ -72,6 +72,9 @@ const EditModal: React.FC<EditModalProps> = ({
           form.setFieldsValue({
             accountId: found.accountId,
             leaderId: found.leaderId,
+            executionMode: found.executionMode,
+            followOnchainActions: found.followOnchainActions,
+            paperInitialBalance: parseFloat(found.paperInitialBalance || '1000'),
             copyMode: found.copyMode,
             copyRatio: found.copyRatio ? parseFloat(found.copyRatio) * 100 : 100,
             fixedAmount: found.fixedAmount ? parseFloat(found.fixedAmount) : undefined,
@@ -216,6 +219,9 @@ const EditModal: React.FC<EditModalProps> = ({
       const request: CopyTradingUpdateRequest = {
         copyTradingId: parseInt(copyTradingId),
         enabled: originalEnabled,
+        executionMode: values.executionMode,
+        followOnchainActions: values.executionMode === 'LIVE' ? Boolean(values.followOnchainActions) : false,
+        paperInitialBalance: values.paperInitialBalance?.toString(),
         copyMode: values.copyMode,
         copyRatio: values.copyMode === 'RATIO' && values.copyRatio ? (values.copyRatio / 100).toString() : undefined,
         fixedAmount: values.copyMode === 'FIXED' ? values.fixedAmount?.toString() : undefined,
@@ -304,6 +310,30 @@ const EditModal: React.FC<EditModalProps> = ({
               placeholder={t('copyTradingEdit.configNamePlaceholder') || '例如：跟单配置1'} 
               maxLength={255}
             />
+          </Form.Item>
+
+          <Form.Item label="執行模式" name="executionMode" rules={[{ required: true }]}>
+            <Radio.Group buttonStyle="solid">
+              <Radio.Button value="PAPER">模擬跟單</Radio.Button>
+              <Radio.Button value="LIVE">實盤跟單</Radio.Button>
+            </Radio.Group>
+          </Form.Item>
+
+          <Form.Item noStyle shouldUpdate={(prev, current) => prev.executionMode !== current.executionMode}>
+            {({ getFieldValue }) => getFieldValue('executionMode') === 'PAPER' ? (
+              <>
+                <Alert type="info" showIcon message="模擬模式不會送出真實訂單。" style={{ marginBottom: 16 }} />
+                <Form.Item
+                  label="模擬初始資金（USDC）"
+                  name="paperInitialBalance"
+                  rules={[{ required: true }, { type: 'number', min: 1 }]}
+                >
+                  <InputNumber min={1} precision={2} style={{ width: '100%' }} />
+                </Form.Item>
+              </>
+            ) : (
+              <Alert type="error" showIcon message="切換到實盤後，下一筆事件可能建立真實訂單。" style={{ marginBottom: 16 }} />
+            )}
           </Form.Item>
           
           <Form.Item
@@ -905,4 +935,3 @@ const EditModal: React.FC<EditModalProps> = ({
 }
 
 export default EditModal
-

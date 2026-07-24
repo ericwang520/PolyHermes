@@ -4,6 +4,7 @@ import com.wrbug.polymarketbot.dto.*
 import com.wrbug.polymarketbot.enums.ErrorCode
 import com.wrbug.polymarketbot.service.copytrading.configs.CopyTradingService
 import com.wrbug.polymarketbot.service.copytrading.configs.FilteredOrderService
+import com.wrbug.polymarketbot.service.copytrading.simulation.CopySimulationService
 import org.slf4j.LoggerFactory
 import org.springframework.context.MessageSource
 import org.springframework.http.ResponseEntity
@@ -17,6 +18,7 @@ import org.springframework.web.bind.annotation.*
 class CopyTradingController(
     private val copyTradingService: CopyTradingService,
     private val filteredOrderService: FilteredOrderService,
+    private val copySimulationService: CopySimulationService,
     private val messageSource: MessageSource
 ) {
     
@@ -81,6 +83,18 @@ class CopyTradingController(
             logger.error("查询跟单列表异常: ${e.message}", e)
             ResponseEntity.ok(ApiResponse.error(ErrorCode.SERVER_COPY_TRADING_LIST_FETCH_FAILED, e.message, messageSource))
         }
+    }
+
+    @PostMapping("/simulation/summary")
+    fun simulationSummary(
+        @RequestBody request: CopySimulationSummaryRequest
+    ): ResponseEntity<ApiResponse<CopySimulationSummaryDto?>> {
+        if (request.copyTradingId <= 0) {
+            return ResponseEntity.ok(
+                ApiResponse.error(ErrorCode.PARAM_COPY_TRADING_ID_INVALID, messageSource = messageSource)
+            )
+        }
+        return ResponseEntity.ok(ApiResponse.success(copySimulationService.summary(request.copyTradingId)))
     }
     
     /**

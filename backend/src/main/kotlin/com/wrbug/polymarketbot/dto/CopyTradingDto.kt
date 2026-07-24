@@ -12,6 +12,9 @@ data class CopyTradingCreateRequest(
     val accountId: Long,
     val leaderId: Long,
     val enabled: Boolean = true,
+    val executionMode: String = "PAPER",
+    val followOnchainActions: Boolean = false,
+    val paperInitialBalance: String = "1000",
     // 可选：如果提供 templateId，则从模板填充配置（可以覆盖）
     val templateId: Long? = null,
     // 跟单配置参数（如果提供 templateId，这些字段可选，用于覆盖模板值）
@@ -52,6 +55,9 @@ data class CopyTradingCreateRequest(
 data class CopyTradingUpdateRequest(
     val copyTradingId: Long,
     val enabled: Boolean? = null,
+    val executionMode: String? = null,
+    val followOnchainActions: Boolean? = null,
+    val paperInitialBalance: String? = null,
     // 跟单配置参数（可选，只更新提供的字段）
     val copyMode: String? = null,
     val copyRatio: String? = null,
@@ -145,6 +151,9 @@ data class CopyTradingDto(
     val leaderName: String?,
     val leaderAddress: String,
     val enabled: Boolean,
+    val executionMode: String = "LIVE",
+    val followOnchainActions: Boolean = false,
+    val paperInitialBalance: String = "1000",
     // 跟单配置参数
     val copyMode: String,
     val copyRatio: String,
@@ -185,6 +194,54 @@ data class CopyTradingDto(
 data class CopyTradingListResponse(
     val list: List<CopyTradingDto>,
     val total: Long
+)
+
+data class CopySimulationSummaryRequest(val copyTradingId: Long)
+
+data class CopySimulationTradeDto(
+    val id: Long,
+    val leaderTradeId: String,
+    val action: String,
+    val marketId: String,
+    val outcomeIndex: Int?,
+    val price: String?,
+    val quantity: String,
+    val notional: String,
+    val realizedPnl: String,
+    val status: String,
+    val reason: String?,
+    val fillAssumption: String,
+    val eventTime: Long
+)
+
+data class CopySimulationPositionDto(
+    val marketId: String,
+    val outcomeIndex: Int,
+    val tokenId: String?,
+    val quantity: String,
+    val averageCost: String,
+    val lastPrice: String?,
+    val marketValue: String?,
+    val unrealizedPnl: String?,
+    val realizedPnl: String,
+    val valuationStatus: String
+)
+
+data class CopySimulationSummaryDto(
+    val copyTradingId: Long,
+    val initialCash: String,
+    val cashBalance: String,
+    val positionValue: String?,
+    val equity: String?,
+    val realizedPnl: String,
+    val unrealizedPnl: String?,
+    val totalPnl: String?,
+    val totalFees: String,
+    val tradeCount: Int,
+    val status: String,
+    val positions: List<CopySimulationPositionDto>,
+    val trades: List<CopySimulationTradeDto>,
+    val updatedAt: Long
 )
 
 /**

@@ -495,6 +495,9 @@ export const apiService = {
      */
     list: (data: { accountId?: number; leaderId?: number; enabled?: boolean } = {}) => 
       apiClient.post<ApiResponse<any>>('/copy-trading/configs/list', data),
+
+    simulationSummary: (data: { copyTradingId: number }) =>
+      apiClient.post<ApiResponse<any>>('/copy-trading/configs/simulation/summary', data),
     
     /**
      * 更新跟单状态（兼容旧接口）
