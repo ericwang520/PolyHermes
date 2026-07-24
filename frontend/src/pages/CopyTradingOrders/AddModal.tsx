@@ -24,6 +24,7 @@ interface AddModalProps {
     fixedAmount?: string
     maxOrderSize?: number
     minOrderSize?: number
+    useFakForSmallOrders?: boolean
     maxDailyLoss?: number
     maxDailyOrders?: number
     supportSell?: boolean
@@ -141,6 +142,7 @@ const AddModal: React.FC<AddModalProps> = ({
       fixedAmount: config.fixedAmount,
       maxOrderSize: config.maxOrderSize,
       minOrderSize: config.minOrderSize,
+      useFakForSmallOrders: config.useFakForSmallOrders ?? false,
       maxDailyLoss: config.maxDailyLoss,
       maxDailyOrders: config.maxDailyOrders,
       supportSell: config.supportSell,
@@ -191,6 +193,7 @@ const AddModal: React.FC<AddModalProps> = ({
           copyRatio: 100,
           maxOrderSize: 1000,
           minOrderSize: 0.01,
+          useFakForSmallOrders: false,
           maxDailyLoss: 10000,
           maxDailyOrders: 100,
           supportSell: true,
@@ -426,6 +429,7 @@ const AddModal: React.FC<AddModalProps> = ({
         fixedAmount: values.copyMode === 'FIXED' ? values.fixedAmount?.toString() : undefined,
         maxOrderSize: values.maxOrderSize?.toString(),
         minOrderSize: values.minOrderSize?.toString(),
+        useFakForSmallOrders: Boolean(values.useFakForSmallOrders),
         maxDailyLoss: values.maxDailyLoss?.toString(),
         maxDailyOrders: values.maxDailyOrders,
         priceTolerance: values.priceTolerance?.toString(),
@@ -491,6 +495,7 @@ const AddModal: React.FC<AddModalProps> = ({
             copyRatio: 100,
             maxOrderSize: 1000,
             minOrderSize: 0.01,
+            useFakForSmallOrders: false,
             maxDailyLoss: 10000,
             maxDailyOrders: 100,
             priceTolerance: 5,
@@ -870,8 +875,18 @@ const AddModal: React.FC<AddModalProps> = ({
                   }}
                 />
               </Form.Item>
+
             </>
           )}
+
+          <Form.Item
+            label="FAK 小額市價模式"
+            name="useFakForSmallOrders"
+            valuePropName="checked"
+            tooltip="開啟後，零碎 BUY/SELL 不必等到市場最低 shares；累積名義金額滿 1 USDC 後，以 FAK 立即成交，未成交部分立即取消。價格容忍度與訂單簿深度檢查仍會套用。"
+          >
+            <Switch checkedChildren="滿 $1 執行" unCheckedChildren="等最低 shares" />
+          </Form.Item>
           
           <Form.Item
             label={t('copyTradingAdd.maxDailyLoss') || '每日最大亏损限制 ($)'}

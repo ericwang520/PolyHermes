@@ -14,6 +14,7 @@ import com.wrbug.polymarketbot.repository.CopySimulationTradeRepository
 import com.wrbug.polymarketbot.service.common.PolymarketClobService
 import com.wrbug.polymarketbot.service.copytrading.orders.CopyShareAccumulatorService
 import com.wrbug.polymarketbot.service.copytrading.orders.ShareAccumulationResult
+import com.wrbug.polymarketbot.service.copytrading.orders.minimumExecutableShares
 import com.wrbug.polymarketbot.service.system.TelegramNotificationService
 import com.wrbug.polymarketbot.util.toSafeBigDecimal
 import kotlinx.coroutines.CoroutineScope
@@ -122,6 +123,11 @@ class CopySimulationService(
             ?: return record(session, config, trade, "BUY", "SKIPPED", "缺少 tokenId，无法读取市场最低 shares", price, quantity, notional)
         val rules = clobService?.getMarketOrderRules(tokenId)?.getOrNull()
             ?: return record(session, config, trade, "BUY", "SKIPPED", "无法读取市场 min_order_size", price, quantity, notional)
+        val executionMinimumShares = minimumExecutableShares(
+            useFakForSmallOrders = config.useFakForSmallOrders,
+            executionPrice = price,
+            marketMinimumShares = rules.minimumShares
+        )
         val accumulator = shareAccumulatorService
             ?: return record(session, config, trade, "BUY", "SKIPPED", "零碎 shares 累积服务不可用", price, quantity, notional)
         val accumulation = accumulator.accumulateAndTake(
@@ -132,7 +138,7 @@ class CopySimulationService(
             side = "BUY",
             followerQuantity = quantity,
             leaderQuantity = trade.size.toSafeBigDecimal(),
-            minimumShares = rules.minimumShares,
+            minimumShares = executionMinimumShares,
             maximumExecutableQuantity = config.maxOrderSize.divide(price, 8, RoundingMode.DOWN),
             eventTime = parseEventTime(trade.timestamp)
         )
@@ -152,10 +158,15 @@ class CopySimulationService(
                 )
             }
             is ShareAccumulationResult.Pending -> {
-                return record(
-                    session, config, trade, "BUY", "PENDING",
+                val reason = if (config.useFakForSmallOrders) {
+                    val pendingNotional = accumulation.pendingQuantity.multiply(price)
+                    "FAK 小额市价累积中: ${pendingNotional.stripTrailingZeros().toPlainString()} / 最低 1 USDC"
+                } else {
                     "零碎单累积中: ${accumulation.pendingQuantity.stripTrailingZeros().toPlainString()} / " +
-                        "${accumulation.minimumShares.stripTrailingZeros().toPlainString()} shares",
+                        "${accumulation.minimumShares.stripTrailingZeros().toPlainString()} shares"
+                }
+                return record(
+                    session, config, trade, "BUY", "PENDING", reason,
                     price, quantity, notional
                 )
             }
@@ -233,6 +244,11 @@ class CopySimulationService(
             ?: return record(session, config, trade, "SELL", "SKIPPED", "缺少 tokenId，无法读取市场最低 shares", price = price)
         val rules = clobService?.getMarketOrderRules(tokenId)?.getOrNull()
             ?: return record(session, config, trade, "SELL", "SKIPPED", "无法读取市场 min_order_size", price = price)
+        val executionMinimumShares = minimumExecutableShares(
+            useFakForSmallOrders = config.useFakForSmallOrders,
+            executionPrice = price,
+            marketMinimumShares = rules.minimumShares
+        )
         val accumulator = shareAccumulatorService
             ?: return record(session, config, trade, "SELL", "SKIPPED", "零碎 shares 累积服务不可用", price = price)
         val accumulation = accumulator.accumulateAndTake(
@@ -243,7 +259,7 @@ class CopySimulationService(
             side = "SELL",
             followerQuantity = requested,
             leaderQuantity = leaderSellQuantity,
-            minimumShares = rules.minimumShares,
+            minimumShares = executionMinimumShares,
             maximumExecutableQuantity = existingPosition?.quantity ?: BigDecimal.ZERO,
             discardRemainderWhenNoCapacity = existingPosition == null,
             eventTime = parseEventTime(trade.timestamp)
@@ -270,10 +286,15 @@ class CopySimulationService(
                 )
             }
             is ShareAccumulationResult.Pending -> {
-                return record(
-                    session, config, trade, "SELL", "PENDING",
+                val reason = if (config.useFakForSmallOrders) {
+                    val pendingNotional = accumulation.pendingQuantity.multiply(price)
+                    "FAK 小额市价累积中: ${pendingNotional.stripTrailingZeros().toPlainString()} / 最低 1 USDC"
+                } else {
                     "零碎单累积中: ${accumulation.pendingQuantity.stripTrailingZeros().toPlainString()} / " +
-                        "${accumulation.minimumShares.stripTrailingZeros().toPlainString()} shares",
+                        "${accumulation.minimumShares.stripTrailingZeros().toPlainString()} shares"
+                }
+                return record(
+                    session, config, trade, "SELL", "PENDING", reason,
                     price, requested, requested.multiply(price)
                 )
             }

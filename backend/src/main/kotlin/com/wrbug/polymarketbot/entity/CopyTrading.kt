@@ -47,6 +47,9 @@ data class CopyTrading(
     
     @Column(name = "min_order_size", nullable = false, precision = 20, scale = 8)
     val minOrderSize: BigDecimal = "1".toSafeBigDecimal(),
+
+    @Column(name = "use_fak_for_small_orders", nullable = false)
+    val useFakForSmallOrders: Boolean = false,
     
     @Column(name = "max_daily_loss", nullable = false, precision = 20, scale = 8)
     val maxDailyLoss: BigDecimal = "10000".toSafeBigDecimal(),

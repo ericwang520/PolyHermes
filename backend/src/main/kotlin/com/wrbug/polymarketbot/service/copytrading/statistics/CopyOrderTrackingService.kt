@@ -21,6 +21,7 @@ import com.wrbug.polymarketbot.service.copytrading.configs.FilterStatus
 import com.wrbug.polymarketbot.service.copytrading.orders.OrderSigningService
 import com.wrbug.polymarketbot.service.copytrading.orders.CopyShareAccumulatorService
 import com.wrbug.polymarketbot.service.copytrading.orders.ShareAccumulationResult
+import com.wrbug.polymarketbot.service.copytrading.orders.minimumExecutableShares
 import com.wrbug.polymarketbot.service.copytrading.simulation.CopySimulationService
 import com.wrbug.polymarketbot.service.common.BlockchainService
 import com.wrbug.polymarketbot.service.common.MarketService
@@ -574,6 +575,11 @@ open class CopyOrderTrackingService(
                         continue
                     }
                     val marketRules = marketRulesResult.getOrThrow()
+                    val executionMinimumShares = minimumExecutableShares(
+                        useFakForSmallOrders = copyTrading.useFakForSmallOrders,
+                        executionPrice = buyPrice,
+                        marketMinimumShares = marketRules.minimumShares
+                    )
                     val accumulation = shareAccumulatorService.accumulateAndTake(
                         copyTradingId = copyTrading.id!!,
                         marketId = effectiveMarketId,
@@ -582,7 +588,7 @@ open class CopyOrderTrackingService(
                         side = "BUY",
                         followerQuantity = finalBuyQuantity,
                         leaderQuantity = trade.size.toSafeBigDecimal(),
-                        minimumShares = marketRules.minimumShares,
+                        minimumShares = executionMinimumShares,
                         maximumExecutableQuantity = copyTrading.maxOrderSize
                             .divide(buyPrice, 8, java.math.RoundingMode.DOWN),
                         eventTime = trade.timestamp.toLongOrNull()?.let {
@@ -608,11 +614,17 @@ open class CopyOrderTrackingService(
                             continue
                         }
                         is ShareAccumulationResult.Pending -> {
+                            val pendingReason = if (copyTrading.useFakForSmallOrders) {
+                                val pendingNotional = accumulation.pendingQuantity.multiply(buyPrice)
+                                "FAK 小額市價累積中：$pendingNotional / 最低 1 USDC"
+                            } else {
+                                "零碎 shares 累積中：${accumulation.pendingQuantity} / 最低 ${accumulation.minimumShares}"
+                            }
                             logger.info(
                                 "零碎买单累积中: copyTradingId=${copyTrading.id}, tokenId=$tokenId, " +
                                     "pending=${accumulation.pendingQuantity}, min=${accumulation.minimumShares}"
                             )
-                            copyExecutionEventService.update(copyTrading, trade, "BUY", "PENDING", "零碎 shares 累积中：${accumulation.pendingQuantity} / 最低 ${accumulation.minimumShares}", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = accumulation.pendingQuantity)
+                            copyExecutionEventService.update(copyTrading, trade, "BUY", "PENDING", pendingReason, marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = accumulation.pendingQuantity)
                             continue
                         }
                         is ShareAccumulationResult.Ready -> {
@@ -1112,6 +1124,11 @@ open class CopyOrderTrackingService(
             return
         }
         val sellRules = sellRulesResult.getOrThrow()
+        val sellMinimumShares = minimumExecutableShares(
+            useFakForSmallOrders = copyTrading.useFakForSmallOrders,
+            executionPrice = sellPrice,
+            marketMinimumShares = sellRules.minimumShares
+        )
         val availableQuantity = unmatchedOrders.fold(BigDecimal.ZERO) { total, order ->
             total.add(order.remainingQuantity.toSafeBigDecimal())
         }
@@ -1123,7 +1140,7 @@ open class CopyOrderTrackingService(
             side = "SELL",
             followerQuantity = finalNeedMatch,
             leaderQuantity = leaderSellTrade.size.toSafeBigDecimal(),
-            minimumShares = sellRules.minimumShares,
+            minimumShares = sellMinimumShares,
             maximumExecutableQuantity = availableQuantity,
             discardRemainderWhenNoCapacity = unmatchedOrders.isEmpty(),
             eventTime = leaderSellTrade.timestamp.toLongOrNull()?.let {

@@ -23,6 +23,7 @@ data class CopyTradingCreateRequest(
     val fixedAmount: String? = null,  // 仅在 copyMode="FIXED" 时生效
     val maxOrderSize: String? = null,
     val minOrderSize: String? = null,
+    val useFakForSmallOrders: Boolean? = null,
     val maxDailyLoss: String? = null,
     val maxDailyOrders: Int? = null,
     val priceTolerance: String? = null,  // 百分比
@@ -64,6 +65,7 @@ data class CopyTradingUpdateRequest(
     val fixedAmount: String? = null,
     val maxOrderSize: String? = null,
     val minOrderSize: String? = null,
+    val useFakForSmallOrders: Boolean? = null,
     val maxDailyLoss: String? = null,
     val maxDailyOrders: Int? = null,
     val priceTolerance: String? = null,
@@ -160,6 +162,7 @@ data class CopyTradingDto(
     val fixedAmount: String?,
     val maxOrderSize: String,
     val minOrderSize: String,
+    val useFakForSmallOrders: Boolean = false,
     val maxDailyLoss: String,
     val maxDailyOrders: Int,
     val priceTolerance: String,

@@ -283,6 +283,7 @@ export interface CopyTrading {
   fixedAmount?: string
   maxOrderSize: string
   minOrderSize: string
+  useFakForSmallOrders: boolean
   maxDailyLoss: string
   maxDailyOrders: number
   priceTolerance: string
@@ -695,6 +696,7 @@ export interface CopyTradingCreateRequest {
   fixedAmount?: string
   maxOrderSize?: string
   minOrderSize?: string
+  useFakForSmallOrders?: boolean
   maxDailyLoss?: string
   maxDailyOrders?: number
   priceTolerance?: string
@@ -736,6 +738,7 @@ export interface CopyTradingUpdateRequest {
   fixedAmount?: string
   maxOrderSize?: string
   minOrderSize?: string
+  useFakForSmallOrders?: boolean
   maxDailyLoss?: string
   maxDailyOrders?: number
   priceTolerance?: string
