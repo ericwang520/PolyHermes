@@ -1091,12 +1091,62 @@ export interface CopyTradingStatistics {
   quoteUnavailableCount?: number
   quoteIncomplete?: boolean
   riskDiagnosis?: CopyTradingRiskDiagnosis | null
+  livePositions?: CopyLivePosition[]
+  eventStats?: CopyExecutionEventStats
+  recentEvents?: CopyExecutionEvent[]
   
   // 盈亏统计
   totalRealizedPnl: string
   totalUnrealizedPnl: string
   totalPnl: string
   totalPnlPercent: string
+}
+
+export interface CopyLivePosition {
+  marketId: string
+  marketTitle: string | null
+  marketSlug: string | null
+  outcomeIndex: number | null
+  outcome: string | null
+  quantity: string
+  averageCost: string
+  cost: string
+  currentPrice: string
+  marketValue: string
+  unrealizedPnl: string
+  quoteStatus: 'AVAILABLE' | 'NO_MATCH' | 'UNAVAILABLE'
+}
+
+export interface CopyExecutionEventStats {
+  total: number
+  today: number
+  detected: number
+  submitted: number
+  filled: number
+  pending: number
+  filtered: number
+  failed: number
+  skipped: number
+  netted: number
+}
+
+export interface CopyExecutionEvent {
+  id: number
+  leaderTradeId: string
+  action: 'BUY' | 'SELL'
+  status: 'DETECTED' | 'SUBMITTED' | 'FILLED' | 'PENDING' | 'FILTERED' | 'FAILED' | 'SKIPPED' | 'NETTED'
+  marketId: string
+  marketTitle: string | null
+  marketSlug: string | null
+  outcomeIndex: number | null
+  leaderPrice: string | null
+  executionPrice: string | null
+  quantity: string
+  notional: string
+  reason: string | null
+  orderId: string | null
+  source: string
+  eventTime: number
 }
 
 export interface CopyTradingRiskDiagnosis {

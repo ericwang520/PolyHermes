@@ -31,6 +31,7 @@ class CopyTradingStatisticsService(
     private val accountRepository: AccountRepository,
     private val leaderRepository: LeaderRepository,
     private val filteredOrderRepository: FilteredOrderRepository,
+    private val copyExecutionEventRepository: CopyExecutionEventRepository,
     private val marketService: com.wrbug.polymarketbot.service.common.MarketService,
     private val blockchainService: BlockchainService
 ) {
@@ -81,6 +82,54 @@ class CopyTradingStatisticsService(
                 filteredOrderCount = filteredOrderCount,
                 pnl = statistics
             )
+            val livePositions = buildLivePositions(buyOrders, quotes)
+            val executionEvents = copyExecutionEventRepository
+                .findTop200ByCopyTradingIdOrderByEventTimeDesc(copyTradingId)
+            val marketIds = (buyOrders.map { it.marketId } + executionEvents.map { it.marketId })
+                .filter { it.isNotBlank() }
+                .distinct()
+            val markets = marketService.getMarkets(marketIds)
+            val recentEvents = executionEvents.map { event ->
+                val market = markets[event.marketId]
+                CopyExecutionEventDto(
+                    id = event.id!!,
+                    leaderTradeId = event.leaderTradeId,
+                    action = event.action,
+                    status = event.status,
+                    marketId = event.marketId,
+                    marketTitle = market?.title,
+                    marketSlug = market?.eventSlug ?: market?.slug,
+                    outcomeIndex = event.outcomeIndex,
+                    leaderPrice = event.leaderPrice?.toPlainString(),
+                    executionPrice = event.executionPrice?.toPlainString(),
+                    quantity = event.quantity.toPlainString(),
+                    notional = event.notional.toPlainString(),
+                    reason = event.reason,
+                    orderId = event.orderId,
+                    source = event.source,
+                    eventTime = event.eventTime
+                )
+            }
+            val startOfToday = java.time.LocalDate.now()
+                .atStartOfDay(java.time.ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli()
+            val statusCounts = copyExecutionEventRepository.countStatuses(copyTradingId)
+                .associate { row -> row[0].toString() to (row[1] as Number).toInt() }
+            val eventStats = CopyExecutionEventStatsDto(
+                total = copyExecutionEventRepository.countByCopyTradingId(copyTradingId).toInt(),
+                today = copyExecutionEventRepository
+                    .countByCopyTradingIdAndEventTimeGreaterThanEqual(copyTradingId, startOfToday)
+                    .toInt(),
+                detected = statusCounts["DETECTED"] ?: 0,
+                submitted = statusCounts["SUBMITTED"] ?: 0,
+                filled = statusCounts["FILLED"] ?: 0,
+                pending = statusCounts["PENDING"] ?: 0,
+                filtered = statusCounts["FILTERED"] ?: 0,
+                failed = statusCounts["FAILED"] ?: 0,
+                skipped = statusCounts["SKIPPED"] ?: 0,
+                netted = statusCounts["NETTED"] ?: 0
+            )
             
             // 7. 构建响应（总盈亏 = 已实现盈亏 + 未实现盈亏）
             val response = CopyTradingStatisticsResponse(
@@ -108,6 +157,15 @@ class CopyTradingStatisticsService(
                 quoteUnavailableCount = statistics.quoteStatusSummary.unavailableCount,
                 quoteIncomplete = statistics.quoteStatusSummary.overallStatus != PositionQuoteStatus.AVAILABLE,
                 riskDiagnosis = diagnosis,
+                livePositions = livePositions.map { position ->
+                    val market = markets[position.marketId]
+                    position.copy(
+                        marketTitle = market?.title,
+                        marketSlug = market?.eventSlug ?: market?.slug
+                    )
+                },
+                eventStats = eventStats,
+                recentEvents = recentEvents,
                 totalRealizedPnl = statistics.totalRealizedPnl.toString(),
                 totalUnrealizedPnl = statistics.totalUnrealizedPnl.toString(),
                 totalPnl = statistics.totalPnl.toString(),
@@ -119,6 +177,50 @@ class CopyTradingStatisticsService(
             logger.error("获取统计信息失败: copyTradingId=$copyTradingId", e)
             Result.failure(e)
         }
+    }
+
+    private fun buildLivePositions(
+        buyOrders: List<CopyOrderTracking>,
+        quotes: List<PositionValuationQuote>
+    ): List<CopyLivePositionDto> {
+        val hasUnavailableQuotes = quotes.any { it.status == PositionQuoteStatus.UNAVAILABLE }
+        return buyOrders
+            .filter { it.remainingQuantity.toSafeBigDecimal().gt(BigDecimal.ZERO) }
+            .groupBy { it.marketId to it.outcomeIndex }
+            .map { (key, orders) ->
+                val quantity = orders.sumOf { it.remainingQuantity.toSafeBigDecimal() }
+                val cost = orders.sumOf { it.remainingQuantity.toSafeBigDecimal().multi(it.price) }
+                val averageCost = if (quantity.gt(BigDecimal.ZERO)) cost.div(quantity) else BigDecimal.ZERO
+                val first = orders.first()
+                val quote = quotes.firstOrNull {
+                    it.marketId == key.first && key.second != null && it.outcomeIndex == key.second
+                } ?: quotes.firstOrNull {
+                    it.marketId == key.first && key.second == null &&
+                        !it.side.isNullOrBlank() && it.side.equals(first.side, ignoreCase = true)
+                }
+                val quoteStatus = when {
+                    quote?.status == PositionQuoteStatus.AVAILABLE -> PositionQuoteStatus.AVAILABLE
+                    hasUnavailableQuotes -> PositionQuoteStatus.UNAVAILABLE
+                    else -> PositionQuoteStatus.NO_MATCH
+                }
+                val currentPrice = quote?.currentPrice ?: BigDecimal.ZERO
+                val marketValue = quantity.multi(currentPrice)
+                CopyLivePositionDto(
+                    marketId = key.first,
+                    marketTitle = null,
+                    marketSlug = null,
+                    outcomeIndex = key.second,
+                    outcome = quote?.side ?: first.side,
+                    quantity = quantity.toPlainString(),
+                    averageCost = averageCost.toPlainString(),
+                    cost = cost.toPlainString(),
+                    currentPrice = currentPrice.toPlainString(),
+                    marketValue = marketValue.toPlainString(),
+                    unrealizedPnl = marketValue.subtract(cost).toPlainString(),
+                    quoteStatus = quoteStatus.name
+                )
+            }
+            .sortedByDescending { it.cost.toSafeBigDecimal() }
     }
     
     /**

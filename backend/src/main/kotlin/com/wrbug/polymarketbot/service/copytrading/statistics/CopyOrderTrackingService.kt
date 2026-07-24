@@ -58,6 +58,7 @@ open class CopyOrderTrackingService(
     private val cryptoUtils: CryptoUtils,
     private val marketService: MarketService,  // 市场信息服务
     private val copySimulationService: CopySimulationService,
+    private val copyExecutionEventService: CopyExecutionEventService,
     private val telegramNotificationService: TelegramNotificationService? = null  // 可选，避免循环依赖
 ) : ApplicationContextAware {
 
@@ -274,39 +275,54 @@ open class CopyOrderTrackingService(
                         copySimulationService.process(copyTrading, trade).getOrThrow()
                         continue
                     }
+                    copyExecutionEventService.detected(copyTrading, trade, "BUY", source)
                     // 获取账户
                     val account = accountRepository.findById(copyTrading.accountId).orElse(null)
-                        ?: continue
+                    if (account == null) {
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", "跟单账户不存在")
+                        continue
+                    }
                     if (WalletType.fromStringOrDefault(account.walletType) == WalletType.SIMULATED) {
                         logger.error("安全攔截：LIVE 配置綁定了模擬錢包，拒絕真實下單: copyTradingId=${copyTrading.id}")
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "SKIPPED", "实盘配置绑定了模拟钱包")
                         continue
                     }
 
                     // 验证账户API凭证
                     if (account.apiKey == null || account.apiSecret == null || account.apiPassphrase == null) {
                         logger.warn("账户未配置API凭证，跳过创建订单: accountId=${account.id}, copyTradingId=${copyTrading.id}")
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", "账户未配置完整 API 凭证")
                         continue
                     }
 
                     // 验证账户是否启用
                     if (!account.isEnabled) {
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "SKIPPED", "账户已停用")
                         continue
                     }
 
                     // 获取 tokenId：优先使用链上解析得到的 tokenId（与 Gamma clobTokenIds 一致），否则用 conditionId+outcomeIndex 链上重算
-                    val tokenId = if (!trade.tokenId.isNullOrBlank()) {
-                        trade.tokenId
+                    val tokenId: String
+                    if (!trade.tokenId.isNullOrBlank()) {
+                        tokenId = trade.tokenId
                     } else {
                         if (trade.outcomeIndex == null) {
                             logger.warn("交易缺少outcomeIndex且无tokenId，无法确定tokenId: tradeId=${trade.id}, market=${trade.market}")
+                            copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", "Leader 交易缺少 outcomeIndex 和 tokenId")
                             continue
                         }
                         val tokenIdResult = blockchainService.getTokenId(trade.market, trade.outcomeIndex)
                         if (tokenIdResult.isFailure) {
                             logger.error("获取tokenId失败: market=${trade.market}, outcomeIndex=${trade.outcomeIndex}, error=${tokenIdResult.exceptionOrNull()?.message}")
+                            copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", "解析 tokenId 失败：${tokenIdResult.exceptionOrNull()?.message}")
                             continue
                         }
-                        tokenIdResult.getOrNull() ?: continue
+                        val resolvedTokenId = tokenIdResult.getOrNull()
+                        if (resolvedTokenId == null) {
+                            copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", "解析 tokenId 返回空值")
+                            continue
+                        }
+                        tokenId = resolvedTokenId
                     }
 
                     // 当链上解析时 Gamma 失败导致 market/outcomeIndex 为空时，按 tokenId 补查市场信息
@@ -321,6 +337,7 @@ open class CopyOrderTrackingService(
                     }
                     if (effectiveMarketId.isBlank()) {
                         logger.warn("无法确定市场(conditionId)，跳过: tradeId=${trade.id}, tokenId=${trade.tokenId}")
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", "无法确定市场 conditionId")
                         continue
                     }
 
@@ -331,6 +348,7 @@ open class CopyOrderTrackingService(
                         calculateBuyQuantity(trade, copyTrading)
                     } catch (e: Exception) {
                         logger.warn("计算买入数量失败: ${e.message}", e)
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", "计算跟单数量失败：${e.message}", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId)
                         continue
                     }
 
@@ -372,6 +390,11 @@ open class CopyOrderTrackingService(
                     val orderbook = filterResult.orderbook  // 获取订单簿（如果需要）
                     if (!filterResult.isPassed) {
                         logger.warn("过滤条件检查失败，跳过创建订单: copyTradingId=${copyTrading.id}, reason=${filterResult.reason}")
+                        copyExecutionEventService.update(
+                            copyTrading, trade, "BUY", "FILTERED", filterResult.reason,
+                            marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId,
+                            quantity = buyQuantity
+                        )
 
                         // 记录被过滤的订单并发送通知（异步，不阻塞）
                         notificationScope.launch {
@@ -453,6 +476,7 @@ open class CopyOrderTrackingService(
                     // 如果数量为0或负数，跳过
                     if (buyQuantity.lte(BigDecimal.ZERO)) {
                         logger.warn("计算得到的买入数量为0，跳过跟单: copyTradingId=${copyTrading.id}, tradeId=${trade.id}")
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "SKIPPED", "计算得到的买入数量为 0", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, quantity = buyQuantity)
                         continue
                     }
 
@@ -466,6 +490,12 @@ open class CopyOrderTrackingService(
                                 "订单金额低于配置门槛，跳过且不向上放大: copyTradingId=${copyTrading.id}, " +
                                     "amount=$rawOrderAmount, min=${copyTrading.minOrderSize}"
                             )
+                            copyExecutionEventService.update(
+                                copyTrading, trade, "BUY", "FILTERED",
+                                "低于单笔最小金额：$rawOrderAmount < ${copyTrading.minOrderSize} USDC",
+                                marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId,
+                                quantity = buyQuantity
+                            )
                             continue
                         }
 
@@ -478,6 +508,7 @@ open class CopyOrderTrackingService(
                                 copyTrading.maxOrderSize.div(tradePrice, 8, java.math.RoundingMode.DOWN)
                             if (adjustedQuantity.lte(BigDecimal.ZERO)) {
                                 logger.warn("调整后的数量为0或负数，跳过: copyTradingId=${copyTrading.id}")
+                                copyExecutionEventService.update(copyTrading, trade, "BUY", "SKIPPED", "套用单笔最大金额后数量为 0", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, quantity = adjustedQuantity)
                                 continue
                             }
                             // 使用调整后的数量
@@ -489,6 +520,7 @@ open class CopyOrderTrackingService(
                     val riskCheckResult = checkRiskControls(copyTrading)
                     if (!riskCheckResult.first) {
                         logger.warn("风险控制检查失败，跳过创建订单: copyTradingId=${copyTrading.id}, reason=${riskCheckResult.second}")
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "FILTERED", riskCheckResult.second, marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, quantity = finalBuyQuantity)
                         continue
                     }
 
@@ -520,12 +552,14 @@ open class CopyOrderTrackingService(
 
                         if (bestAsk == null) {
                             logger.warn("订单簿中没有卖单，跳过创建订单: copyTradingId=${copyTrading.id}, tradeId=${trade.id}")
+                            copyExecutionEventService.update(copyTrading, trade, "BUY", "SKIPPED", "订单簿没有可成交卖单", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = finalBuyQuantity)
                             continue
                         }
 
                         // 如果调整后的买入价格低于最佳卖单价格，无法匹配
                         if (buyPrice.lt(bestAsk)) {
                             logger.info("调整后的买入价格 ($buyPrice) 低于最佳卖单价格 ($bestAsk)，无法匹配，跳过创建订单: copyTradingId=${copyTrading.id}, tradeId=${trade.id}, leaderPrice=${trade.price}, tolerance=${copyTrading.priceTolerance}")
+                            copyExecutionEventService.update(copyTrading, trade, "BUY", "FILTERED", "超过价格容忍度：最高买价 $buyPrice，最佳卖价 $bestAsk", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = finalBuyQuantity)
                             continue
                         }
                     }
@@ -536,6 +570,7 @@ open class CopyOrderTrackingService(
                             "无法读取市场最低 shares，安全跳过: copyTradingId=${copyTrading.id}, " +
                                 "tokenId=$tokenId, error=${marketRulesResult.exceptionOrNull()?.message}"
                         )
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", "读取市场最小 shares 失败：${marketRulesResult.exceptionOrNull()?.message}", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = finalBuyQuantity)
                         continue
                     }
                     val marketRules = marketRulesResult.getOrThrow()
@@ -561,6 +596,7 @@ open class CopyOrderTrackingService(
                                 "零碎买单没有可执行容量: copyTradingId=${copyTrading.id}, tokenId=$tokenId, " +
                                     "discarded=${accumulation.discardedQuantity}"
                             )
+                            copyExecutionEventService.update(copyTrading, trade, "BUY", "SKIPPED", "没有可执行容量，舍弃 ${accumulation.discardedQuantity} shares", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = accumulation.discardedQuantity)
                             continue
                         }
                         is ShareAccumulationResult.Netted -> {
@@ -568,6 +604,7 @@ open class CopyOrderTrackingService(
                                 "零碎买卖已抵消: copyTradingId=${copyTrading.id}, tokenId=$tokenId, " +
                                     "cancelled=${accumulation.cancelledQuantity}, opposite=${accumulation.oppositeSide}"
                             )
+                            copyExecutionEventService.update(copyTrading, trade, "BUY", "NETTED", "与待处理 ${accumulation.oppositeSide} 抵消 ${accumulation.cancelledQuantity} shares", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = accumulation.cancelledQuantity)
                             continue
                         }
                         is ShareAccumulationResult.Pending -> {
@@ -575,6 +612,7 @@ open class CopyOrderTrackingService(
                                 "零碎买单累积中: copyTradingId=${copyTrading.id}, tokenId=$tokenId, " +
                                     "pending=${accumulation.pendingQuantity}, min=${accumulation.minimumShares}"
                             )
+                            copyExecutionEventService.update(copyTrading, trade, "BUY", "PENDING", "零碎 shares 累积中：${accumulation.pendingQuantity} / 最低 ${accumulation.minimumShares}", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = accumulation.pendingQuantity)
                             continue
                         }
                         is ShareAccumulationResult.Ready -> {
@@ -601,6 +639,7 @@ open class CopyOrderTrackingService(
                         decryptApiSecret(account)
                     } catch (e: Exception) {
                         logger.warn("解密 API 凭证失败，跳过创建订单: accountId=${account.id}, error=${e.message}")
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", "解密 API Secret 失败：${e.message}", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = finalBuyQuantity)
                         restoreBuyAccumulation()
                         continue
                     }
@@ -608,6 +647,7 @@ open class CopyOrderTrackingService(
                         decryptApiPassphrase(account)
                     } catch (e: Exception) {
                         logger.warn("解密 API 凭证失败，跳过创建订单: accountId=${account.id}, error=${e.message}")
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", "解密 API Passphrase 失败：${e.message}", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = finalBuyQuantity)
                         restoreBuyAccumulation()
                         continue
                     }
@@ -624,6 +664,7 @@ open class CopyOrderTrackingService(
                     val decryptedPrivateKey = try {
                         decryptPrivateKey(account)
                     } catch (e: Exception) {
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", "解密私钥失败：${e.message}", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = finalBuyQuantity)
                         restoreBuyAccumulation()
                         continue
                     }
@@ -659,6 +700,7 @@ open class CopyOrderTrackingService(
                         // 提取错误信息（只保留 code 和 errorBody）
                         val exception = createOrderResult.exceptionOrNull()
                         logger.error("创建买入订单失败: copyTradingId=${copyTrading.id}, tradeId=${trade.id}, leaderPrice=${trade.price}, myPrice=$buyPrice, error=${exception?.message}")
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", exception?.message ?: "CLOB 下单失败", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = finalBuyQuantity)
 
                         // 发送订单失败通知（异步，不阻塞，仅在 pushFailedOrders 为 true 时发送）
                         if (copyTrading.pushFailedOrders) {
@@ -699,11 +741,16 @@ open class CopyOrderTrackingService(
                         continue
                     }
 
-                    val realOrderId = createOrderResult.getOrNull() ?: continue
+                    val realOrderId = createOrderResult.getOrNull()
+                    if (realOrderId == null) {
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", "CLOB 未返回订单 ID", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = finalBuyQuantity)
+                        continue
+                    }
 
                     // 验证 orderId 格式（必须以 0x 开头的 16 进制）
                     if (!isValidOrderId(realOrderId)) {
                         logger.warn("买入订单ID格式无效，跳过保存: orderId=$realOrderId")
+                        copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", "CLOB 返回无效订单 ID：$realOrderId", marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId, executionPrice = buyPrice, quantity = finalBuyQuantity)
                         restoreBuyAccumulation()
                         continue
                     }
@@ -729,10 +776,16 @@ open class CopyOrderTrackingService(
                     )
 
                     copyOrderTrackingRepository.save(tracking)
+                    copyExecutionEventService.update(
+                        copyTrading, trade, "BUY", "FILLED", "FAK 订单已由 CLOB 接受",
+                        marketId = effectiveMarketId, outcomeIndex = effectiveOutcomeIndex, tokenId = tokenId,
+                        executionPrice = buyPrice, quantity = finalBuyQuantity, orderId = realOrderId
+                    )
 
                     logger.info("买入订单已保存，等待轮询任务获取实际数据后发送通知: orderId=$realOrderId, copyTradingId=${copyTrading.id}")
                 } catch (e: Exception) {
                     logger.error("处理买入交易失败: copyTradingId=${copyTrading.id}, tradeId=${trade.id}", e)
+                    copyExecutionEventService.update(copyTrading, trade, "BUY", "FAILED", e.message ?: "处理买入交易发生未知错误", source = source)
                     // 继续处理下一个跟单关系
                 }
             }
@@ -765,8 +818,10 @@ open class CopyOrderTrackingService(
                         copySimulationService.process(copyTrading, trade).getOrThrow()
                         continue
                     }
+                    copyExecutionEventService.detected(copyTrading, trade, "SELL", "leader-stream")
                     // 检查是否支持卖出
                     if (!copyTrading.supportSell) {
+                        copyExecutionEventService.update(copyTrading, trade, "SELL", "SKIPPED", "配置未启用跟单卖出")
                         continue
                     }
 
@@ -774,6 +829,7 @@ open class CopyOrderTrackingService(
                     matchSellOrder(copyTrading, trade)
                 } catch (e: Exception) {
                     logger.error("处理卖出交易失败: copyTradingId=${copyTrading.id}, tradeId=${trade.id}", e)
+                    copyExecutionEventService.update(copyTrading, trade, "SELL", "FAILED", e.message ?: "处理卖出交易发生未知错误")
                     // 继续处理下一个跟单关系
                 }
             }
@@ -952,21 +1008,25 @@ open class CopyOrderTrackingService(
         val account = accountRepository.findById(copyTrading.accountId).orElse(null)
             ?: run {
                 logger.warn("账户不存在，跳过卖出匹配: accountId=${copyTrading.accountId}, copyTradingId=${copyTrading.id}")
+                copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "FAILED", "跟单账户不存在")
                 return
             }
         if (WalletType.fromStringOrDefault(account.walletType) == WalletType.SIMULATED) {
             logger.error("安全攔截：模擬錢包不得建立真實賣單: copyTradingId=${copyTrading.id}")
+            copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "SKIPPED", "实盘配置绑定了模拟钱包")
             return
         }
 
         // 验证账户API凭证
         if (account.apiKey == null || account.apiSecret == null || account.apiPassphrase == null) {
             logger.warn("账户未配置API凭证，跳过创建卖出订单: accountId=${account.id}, copyTradingId=${copyTrading.id}")
+            copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "FAILED", "账户未配置完整 API 凭证")
             return
         }
 
         // 验证账户是否启用
         if (!account.isEnabled) {
+            copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "SKIPPED", "账户已停用")
             return
         }
 
@@ -974,6 +1034,7 @@ open class CopyOrderTrackingService(
         // 直接使用outcomeIndex匹配，而不是转换为YES/NO
         if (leaderSellTrade.outcomeIndex == null) {
             logger.warn("卖出交易缺少outcomeIndex，无法匹配: tradeId=${leaderSellTrade.id}, market=${leaderSellTrade.market}")
+            copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "FAILED", "Leader 卖出缺少 outcomeIndex")
             return
         }
 
@@ -1020,11 +1081,13 @@ open class CopyOrderTrackingService(
         } else {
             if (leaderSellTrade.outcomeIndex == null) {
                 logger.error("卖出交易缺少outcomeIndex且无tokenId: market=${leaderSellTrade.market}")
+                copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "FAILED", "Leader 卖出缺少 outcomeIndex 和 tokenId")
                 return
             }
             val tokenIdResult = blockchainService.getTokenId(leaderSellTrade.market, leaderSellTrade.outcomeIndex)
             if (tokenIdResult.isFailure) {
                 logger.error("获取tokenId失败: market=${leaderSellTrade.market}, outcomeIndex=${leaderSellTrade.outcomeIndex}, error=${tokenIdResult.exceptionOrNull()?.message}")
+                copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "FAILED", "解析 tokenId 失败：${tokenIdResult.exceptionOrNull()?.message}")
                 return
             }
             tokenIdResult.getOrNull() ?: return
@@ -1045,6 +1108,7 @@ open class CopyOrderTrackingService(
                 "无法读取卖出市场最低 shares，安全跳过: copyTradingId=${copyTrading.id}, " +
                     "tokenId=$tokenId, error=${sellRulesResult.exceptionOrNull()?.message}"
             )
+            copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "FAILED", "读取市场最小 shares 失败：${sellRulesResult.exceptionOrNull()?.message}", tokenId = tokenId, executionPrice = sellPrice, quantity = finalNeedMatch)
             return
         }
         val sellRules = sellRulesResult.getOrThrow()
@@ -1072,6 +1136,7 @@ open class CopyOrderTrackingService(
                     "卖出信号无可用持仓，已忽略剩余零碎量: copyTradingId=${copyTrading.id}, tokenId=$tokenId, " +
                         "cancelled=${sellAccumulation.cancelledQuantity}, discarded=${sellAccumulation.discardedQuantity}"
                 )
+                copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "SKIPPED", "没有可卖出的持仓，舍弃 ${sellAccumulation.discardedQuantity} shares", tokenId = tokenId, executionPrice = sellPrice, quantity = sellAccumulation.discardedQuantity)
                 return
             }
             is ShareAccumulationResult.Netted -> {
@@ -1079,6 +1144,7 @@ open class CopyOrderTrackingService(
                     "零碎买卖已抵消: copyTradingId=${copyTrading.id}, tokenId=$tokenId, " +
                         "cancelled=${sellAccumulation.cancelledQuantity}, opposite=${sellAccumulation.oppositeSide}"
                 )
+                copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "NETTED", "与待处理 ${sellAccumulation.oppositeSide} 抵消 ${sellAccumulation.cancelledQuantity} shares", tokenId = tokenId, executionPrice = sellPrice, quantity = sellAccumulation.cancelledQuantity)
                 return
             }
             is ShareAccumulationResult.Pending -> {
@@ -1086,6 +1152,7 @@ open class CopyOrderTrackingService(
                     "零碎卖单累积中: copyTradingId=${copyTrading.id}, tokenId=$tokenId, " +
                         "pending=${sellAccumulation.pendingQuantity}, min=${sellAccumulation.minimumShares}"
                 )
+                copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "PENDING", "零碎 shares 累积中：${sellAccumulation.pendingQuantity} / 最低 ${sellAccumulation.minimumShares}", tokenId = tokenId, executionPrice = sellPrice, quantity = sellAccumulation.pendingQuantity)
                 return
             }
             is ShareAccumulationResult.Ready -> {
@@ -1143,6 +1210,7 @@ open class CopyOrderTrackingService(
         }
 
         if (totalMatched.lte(BigDecimal.ZERO)) {
+            copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "SKIPPED", "没有可卖出的实盘持仓", tokenId = tokenId, executionPrice = sellPrice, quantity = BigDecimal.ZERO)
             restoreSellAccumulation()
             return
         }
@@ -1152,6 +1220,7 @@ open class CopyOrderTrackingService(
                 "卖出数量低于市场最低 shares，跳过: copyTradingId=${copyTrading.id}, " +
                     "tradeId=${leaderSellTrade.id}, quantity=$totalMatched, min=${sellRules.minimumShares}"
             )
+            copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "PENDING", "可卖数量 $totalMatched 低于市场最低 ${sellRules.minimumShares} shares", tokenId = tokenId, executionPrice = sellPrice, quantity = totalMatched)
             restoreSellAccumulation()
             return
         }
@@ -1161,12 +1230,14 @@ open class CopyOrderTrackingService(
             decryptApiSecret(account)
         } catch (e: Exception) {
             logger.warn("解密 API 凭证失败，跳过创建卖出订单: accountId=${account.id}, error=${e.message}")
+            copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "FAILED", "解密 API Secret 失败：${e.message}", tokenId = tokenId, executionPrice = sellPrice, quantity = totalMatched)
             return
         }
         val apiPassphrase = try {
             decryptApiPassphrase(account)
         } catch (e: Exception) {
             logger.warn("解密 API 凭证失败，跳过创建卖出订单: accountId=${account.id}, error=${e.message}")
+            copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "FAILED", "解密 API Passphrase 失败：${e.message}", tokenId = tokenId, executionPrice = sellPrice, quantity = totalMatched)
             return
         }
 
@@ -1174,6 +1245,7 @@ open class CopyOrderTrackingService(
         val decryptedPrivateKey = try {
             decryptPrivateKey(account)
         } catch (e: Exception) {
+            copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "FAILED", "解密私钥失败：${e.message}", tokenId = tokenId, executionPrice = sellPrice, quantity = totalMatched)
             restoreSellAccumulation()
             return
         }
@@ -1197,6 +1269,7 @@ open class CopyOrderTrackingService(
             )
         } catch (e: Exception) {
             logger.error("创建并签名卖出订单失败: copyTradingId=${copyTrading.id}, tradeId=${leaderSellTrade.id}", e)
+            copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "FAILED", "创建卖出签名失败：${e.message}", tokenId = tokenId, executionPrice = sellPrice, quantity = totalMatched)
             restoreSellAccumulation()
             return
         }
@@ -1239,11 +1312,13 @@ open class CopyOrderTrackingService(
             // 创建订单失败，记录错误日志
             val exception = createOrderResult.exceptionOrNull()
             logger.error("创建卖出订单失败: copyTradingId=${copyTrading.id}, tradeId=${leaderSellTrade.id}, error=${exception?.message}")
+            copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "FAILED", exception?.message ?: "CLOB 卖出失败", tokenId = tokenId, executionPrice = sellPrice, quantity = totalMatched)
             restoreSellAccumulation()
             return
         }
 
         val realSellOrderId = createOrderResult.getOrNull() ?: run {
+            copyExecutionEventService.update(copyTrading, leaderSellTrade, "SELL", "FAILED", "CLOB 未返回卖出订单 ID", tokenId = tokenId, executionPrice = sellPrice, quantity = totalMatched)
             restoreSellAccumulation()
             return
         }
@@ -1305,6 +1380,12 @@ open class CopyOrderTrackingService(
             val savedDetail = detail.copy(matchRecordId = savedRecord.id!!)
             sellMatchDetailRepository.save(savedDetail)
         }
+
+        copyExecutionEventService.update(
+            copyTrading, leaderSellTrade, "SELL", "FILLED", "FAK 卖出订单已由 CLOB 接受",
+            tokenId = tokenId, executionPrice = actualSellPrice, quantity = totalMatched,
+            orderId = realSellOrderId
+        )
 
         logger.info("卖出订单已保存，等待轮询任务获取实际数据后发送通知: orderId=$realSellOrderId, copyTradingId=${copyTrading.id}")
 

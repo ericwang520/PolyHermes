@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Modal, Row, Col, Statistic, Spin, message } from 'antd'
+import { Modal, Row, Col, Statistic, Spin, message, Table, Tag, Divider, Alert } from 'antd'
 import { ArrowUpOutlined, ArrowDownOutlined } from '@ant-design/icons'
 import { apiService } from '../../services/api'
 import { formatUSDC } from '../../utils'
 import { useTranslation } from 'react-i18next'
 import { useMediaQuery } from 'react-responsive'
-import type { CopyTradingStatistics } from '../../types'
+import type { CopyExecutionEvent, CopyLivePosition, CopyTradingStatistics } from '../../types'
 import CopyTradingRiskSeatbeltPanel from '../../components/CopyTradingRiskSeatbeltPanel'
 
 interface StatisticsModalProps {
@@ -59,6 +59,108 @@ const StatisticsModal: React.FC<StatisticsModalProps> = ({
     if (isNaN(num)) return null
     return num >= 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />
   }
+
+  const statusColor: Record<string, string> = {
+    FILLED: 'success',
+    SUBMITTED: 'processing',
+    DETECTED: 'default',
+    PENDING: 'warning',
+    FILTERED: 'orange',
+    FAILED: 'error',
+    SKIPPED: 'default',
+    NETTED: 'purple'
+  }
+
+  const statusText: Record<string, string> = {
+    FILLED: '已成交',
+    SUBMITTED: '已送单',
+    DETECTED: '已侦测',
+    PENDING: '累积中',
+    FILTERED: '已过滤',
+    FAILED: '失败',
+    SKIPPED: '已跳过',
+    NETTED: '已抵消'
+  }
+
+  const liveDetails = statistics ? (
+    <div>
+      <Divider orientation="left">实盘事件统计</Divider>
+      {statistics.eventStats?.total === 0 && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="事件账本从本版本部署后开始记录；旧订单仍会显示在目前持仓。"
+        />
+      )}
+      <Row gutter={[12, 12]}>
+        <Col xs={12} sm={8} md={4}><Statistic title="今日讯号" value={statistics.eventStats?.today ?? 0} /></Col>
+        <Col xs={12} sm={8} md={4}><Statistic title="已成交" value={statistics.eventStats?.filled ?? 0} valueStyle={{ color: '#3f8600' }} /></Col>
+        <Col xs={12} sm={8} md={4}><Statistic title="累积中" value={statistics.eventStats?.pending ?? 0} valueStyle={{ color: '#d48806' }} /></Col>
+        <Col xs={12} sm={8} md={4}><Statistic title="已过滤" value={statistics.eventStats?.filtered ?? 0} valueStyle={{ color: '#d46b08' }} /></Col>
+        <Col xs={12} sm={8} md={4}><Statistic title="失败" value={statistics.eventStats?.failed ?? 0} valueStyle={{ color: '#cf1322' }} /></Col>
+        <Col xs={12} sm={8} md={4}><Statistic title="全部事件" value={statistics.eventStats?.total ?? 0} /></Col>
+      </Row>
+
+      <Divider orientation="left">目前实盘持仓</Divider>
+      <Table<CopyLivePosition>
+        rowKey={(row) => `${row.marketId}-${row.outcomeIndex}`}
+        size="small"
+        pagination={false}
+        scroll={{ x: 900 }}
+        locale={{ emptyText: '目前没有归属于此跟单配置的实盘持仓' }}
+        dataSource={statistics.livePositions ?? []}
+        columns={[
+          {
+            title: '市场',
+            dataIndex: 'marketTitle',
+            width: 300,
+            render: (_value, row) => (
+              row.marketSlug
+                ? <a href={`https://polymarket.com/event/${row.marketSlug}`} target="_blank" rel="noreferrer">{row.marketTitle || row.marketId}</a>
+                : <span>{row.marketTitle || row.marketId}</span>
+            )
+          },
+          { title: '结果', dataIndex: 'outcome', width: 90, render: (value, row) => value || `#${row.outcomeIndex ?? '-'}` },
+          { title: 'Shares', dataIndex: 'quantity', width: 110, render: value => formatUSDC(value) },
+          { title: '均价', dataIndex: 'averageCost', width: 90, render: value => formatUSDC(value) },
+          { title: '现价', dataIndex: 'currentPrice', width: 90, render: (value, row) => row.quoteStatus === 'AVAILABLE' ? formatUSDC(value) : <Tag color="warning">报价缺失</Tag> },
+          { title: '成本', dataIndex: 'cost', width: 110, render: value => `$${formatUSDC(value)}` },
+          { title: '市值', dataIndex: 'marketValue', width: 110, render: value => `$${formatUSDC(value)}` },
+          { title: '未实现', dataIndex: 'unrealizedPnl', width: 110, render: value => <span style={{ color: getPnlColor(value) }}>${formatUSDC(value)}</span> }
+        ]}
+      />
+
+      <Divider orientation="left">最近实盘事件</Divider>
+      <Table<CopyExecutionEvent>
+        rowKey="id"
+        size="small"
+        pagination={{ pageSize: 20, showSizeChanger: false }}
+        scroll={{ x: 1150 }}
+        locale={{ emptyText: '尚无实盘事件；启用配置后收到 Leader 新讯号就会显示在这里' }}
+        dataSource={statistics.recentEvents ?? []}
+        columns={[
+          { title: '时间', dataIndex: 'eventTime', width: 165, render: value => new Date(value).toLocaleString() },
+          { title: '动作', dataIndex: 'action', width: 75, render: value => <Tag color={value === 'BUY' ? 'blue' : 'red'}>{value}</Tag> },
+          { title: '状态', dataIndex: 'status', width: 90, render: value => <Tag color={statusColor[value] || 'default'}>{statusText[value] || value}</Tag> },
+          {
+            title: '市场',
+            dataIndex: 'marketTitle',
+            width: 300,
+            render: (_value, row) => (
+              row.marketSlug
+                ? <a href={`https://polymarket.com/event/${row.marketSlug}`} target="_blank" rel="noreferrer">{row.marketTitle || row.marketId}</a>
+                : <span>{row.marketTitle || row.marketId}</span>
+            )
+          },
+          { title: '金额', dataIndex: 'notional', width: 100, render: value => `$${formatUSDC(value)}` },
+          { title: 'Shares', dataIndex: 'quantity', width: 100, render: value => formatUSDC(value) },
+          { title: '执行价', dataIndex: 'executionPrice', width: 90, render: (value, row) => value ? formatUSDC(value) : formatUSDC(row.leaderPrice || '0') },
+          { title: '原因 / 订单', dataIndex: 'reason', width: 360, render: (value, row) => <span>{value || row.orderId || '-'}</span> }
+        ]}
+      />
+    </div>
+  ) : null
   
   
   return (
@@ -161,6 +263,7 @@ const StatisticsModal: React.FC<StatisticsModalProps> = ({
             </div>
           </div>
           <CopyTradingRiskSeatbeltPanel statistics={statistics} onApplied={fetchStatistics} compact />
+          {liveDetails}
         </div>
       ) : (
         <div>
@@ -233,6 +336,7 @@ const StatisticsModal: React.FC<StatisticsModalProps> = ({
             </Col>
           </Row>
           <CopyTradingRiskSeatbeltPanel statistics={statistics} onApplied={fetchStatistics} compact />
+          {liveDetails}
         </div>
       )}
     </Modal>

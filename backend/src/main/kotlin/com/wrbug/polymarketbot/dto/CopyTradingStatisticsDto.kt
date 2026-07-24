@@ -34,12 +34,64 @@ data class CopyTradingStatisticsResponse(
     val quoteUnavailableCount: Int = 0,
     val quoteIncomplete: Boolean = false,
     val riskDiagnosis: CopyTradingRiskDiagnosisDto? = null,
+
+    // 实盘可观测性
+    val livePositions: List<CopyLivePositionDto> = emptyList(),
+    val eventStats: CopyExecutionEventStatsDto = CopyExecutionEventStatsDto(),
+    val recentEvents: List<CopyExecutionEventDto> = emptyList(),
     
     // 盈亏统计
     val totalRealizedPnl: String,
     val totalUnrealizedPnl: String,
     val totalPnl: String,
     val totalPnlPercent: String
+)
+
+data class CopyLivePositionDto(
+    val marketId: String,
+    val marketTitle: String?,
+    val marketSlug: String?,
+    val outcomeIndex: Int?,
+    val outcome: String?,
+    val quantity: String,
+    val averageCost: String,
+    val cost: String,
+    val currentPrice: String,
+    val marketValue: String,
+    val unrealizedPnl: String,
+    val quoteStatus: String
+)
+
+data class CopyExecutionEventStatsDto(
+    val total: Int = 0,
+    val today: Int = 0,
+    val detected: Int = 0,
+    val submitted: Int = 0,
+    val filled: Int = 0,
+    val pending: Int = 0,
+    val filtered: Int = 0,
+    val failed: Int = 0,
+    val skipped: Int = 0,
+    val netted: Int = 0
+)
+
+data class CopyExecutionEventDto(
+    val id: Long,
+    val leaderTradeId: String,
+    val action: String,
+    val status: String,
+    val marketId: String,
+    val marketTitle: String?,
+    val marketSlug: String?,
+    val outcomeIndex: Int?,
+    val leaderPrice: String?,
+    val executionPrice: String?,
+    val quantity: String,
+    val notional: String,
+    val reason: String?,
+    val orderId: String?,
+    val source: String,
+    val eventTime: Long
 )
 
 data class CopyTradingRiskDiagnosisDto(
