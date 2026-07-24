@@ -1,0 +1,168 @@
+name: Build and Deploy Simulation Wallet
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/deposit-wallet-poly1271
+    paths:
+      - backend/**
+      - frontend/**
+      - docker/**
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/deploy-sim-wallet.yml
+
+concurrency:
+  group: simulation-wallet-production
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/ericwang520/polyhermes
+
+jobs:
+  test-build-push:
+    name: Test, build, and publish
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            backend/*.gradle.kts
+            backend/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Test and build backend
+        working-directory: backend
+        run: |
+          chmod +x gradlew
+          ./gradlew test bootJar --no-daemon
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          VERSION: sim-wallet-${{ github.run_number }}
+          GIT_TAG: ${{ github.sha }}
+          GITHUB_REPO_URL: https://github.com/ericwang520/PolyHermes
+        run: |
+          npm ci
+          npm run build
+
+      - name: Set image reference
+        id: image
+        run: echo "ref=${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.ref }}
+            ${{ env.IMAGE_NAME }}:sim-wallet-latest
+          build-args: |
+            BUILD_IN_DOCKER=false
+            VERSION=sim-wallet-${{ github.run_number }}
+            GIT_TAG=${{ github.sha }}
+            GITHUB_REPO_URL=https://github.com/ericwang520/PolyHermes
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to EC2
+    needs: test-build-push
+    if: vars.ENABLE_EC2_DEPLOY == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Configure deployment SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/polyhermes_deploy"
+          chmod 600 "$HOME/.ssh/polyhermes_deploy"
+          ssh-keyscan -H "$DEPLOY_HOST" >> "$HOME/.ssh/known_hosts"
+
+      - name: Authenticate EC2 to GHCR
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | ssh \
+            -i "$HOME/.ssh/polyhermes_deploy" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "docker login ghcr.io -u '$GHCR_USER' --password-stdin"
+
+      - name: Deploy immutable image and verify health
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          IMAGE: ${{ needs.test-build-push.outputs.image }}
+        run: |
+          ssh -i "$HOME/.ssh/polyhermes_deploy" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "IMAGE='$IMAGE' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd /home/ec2-user/polyhermes
+
+          docker pull "$IMAGE"
+
+          if grep -q '^POLYHERMES_IMAGE=' .env; then
+            sed -i "s|^POLYHERMES_IMAGE=.*|POLYHERMES_IMAGE=$IMAGE|" .env
+          else
+            printf '\nPOLYHERMES_IMAGE=%s\n' "$IMAGE" >> .env
+          fi
+
+          docker compose -f docker-compose.prod.yml up -d --no-deps --force-recreate app
+
+          for attempt in $(seq 1 60); do
+            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' polyhermes 2>/dev/null || true)"
+            if [ "$status" = "healthy" ]; then
+              break
+            fi
+            if [ "$status" = "unhealthy" ] || [ "$status" = "exited" ]; then
+              docker logs --tail 200 polyhermes
+              exit 1
+            fi
+            sleep 5
+          done
+
+          test "$(docker inspect --format '{{.State.Health.Status}}' polyhermes)" = "healthy"
+          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:27315/ >/dev/null
+          docker exec polyhermes cat /app/version.json
+          REMOTE
