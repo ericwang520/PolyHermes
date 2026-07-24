@@ -127,7 +127,8 @@ class CopyTradingService(
                     copyRatio = request.copyRatio?.toSafeBigDecimal() ?: BigDecimal.ONE,
                     fixedAmount = request.fixedAmount?.toSafeBigDecimal(),
                     maxOrderSize = request.maxOrderSize?.toSafeBigDecimal() ?: "1000".toSafeBigDecimal(),
-                    minOrderSize = request.minOrderSize?.toSafeBigDecimal() ?: "1".toSafeBigDecimal(),
+                    minOrderSize = request.minOrderSize?.toSafeBigDecimal()
+                        ?: minimumOrderAmount(executionMode),
                     maxDailyLoss = request.maxDailyLoss?.toSafeBigDecimal() ?: "10000".toSafeBigDecimal(),
                     maxDailyOrders = request.maxDailyOrders ?: 100,
                     priceTolerance = request.priceTolerance?.toSafeBigDecimal() ?: "5".toSafeBigDecimal(),
@@ -148,6 +149,12 @@ class CopyTradingService(
                     pushFilteredOrders = request.pushFilteredOrders ?: false  // 手动输入时使用请求中的值，默认为 false
                 )
             }
+            validateOrderAmounts(
+                executionMode = executionMode,
+                copyMode = config.copyMode,
+                fixedAmount = config.fixedAmount,
+                minOrderSize = config.minOrderSize
+            )
             
             // 6. 创建跟单配置
             val copyTrading = CopyTrading(
@@ -335,6 +342,12 @@ class CopyTradingService(
                     copyTrading.maxMarketEndDate
                 },
                 updatedAt = System.currentTimeMillis()
+            )
+            validateOrderAmounts(
+                executionMode = updated.executionMode,
+                copyMode = updated.copyMode,
+                fixedAmount = updated.fixedAmount,
+                minOrderSize = updated.minOrderSize
             )
             
             val saved = copyTradingRepository.save(updated)
@@ -630,6 +643,38 @@ class CopyTradingService(
                         !account.apiSecret.isNullOrBlank() &&
                         !account.apiPassphrase.isNullOrBlank()
                 ) { "實盤錢包尚未設定完整的 Polymarket API 憑證" }
+            }
+        }
+    }
+
+    private fun minimumOrderAmount(executionMode: String): BigDecimal =
+        if (executionMode == CopyExecutionMode.PAPER.name) {
+            BigDecimal("0.01")
+        } else {
+            BigDecimal.ONE
+        }
+
+    private fun validateOrderAmounts(
+        executionMode: String,
+        copyMode: String,
+        fixedAmount: BigDecimal?,
+        minOrderSize: BigDecimal
+    ) {
+        val minimum = minimumOrderAmount(executionMode)
+        require(minOrderSize >= minimum) {
+            if (executionMode == CopyExecutionMode.PAPER.name) {
+                "模擬模式單筆最小金額必須 >= 0.01"
+            } else {
+                "實盤模式單筆最小金額必須 >= 1"
+            }
+        }
+        if (copyMode == "FIXED") {
+            require(fixedAmount != null && fixedAmount >= minimum) {
+                if (executionMode == CopyExecutionMode.PAPER.name) {
+                    "模擬模式固定金額必須 >= 0.01"
+                } else {
+                    "實盤模式固定金額必須 >= 1"
+                }
             }
         }
     }

@@ -45,6 +45,7 @@ const AddModal: React.FC<AddModalProps> = ({
   const { accounts, fetchAccounts } = useAccountStore()
   const [form] = Form.useForm()
   const executionMode = Form.useWatch('executionMode', form) || 'PAPER'
+  const minimumOrderAmount = executionMode === 'PAPER' ? 0.01 : 1
   const selectedAccountId = Form.useWatch('accountId', form)
   const [loading, setLoading] = useState(false)
   const [leaders, setLeaders] = useState<Leader[]>([])
@@ -189,7 +190,7 @@ const AddModal: React.FC<AddModalProps> = ({
           copyMode: 'RATIO',
           copyRatio: 100,
           maxOrderSize: 1000,
-          minOrderSize: 1,
+          minOrderSize: 0.01,
           maxDailyLoss: 10000,
           maxDailyOrders: 100,
           supportSell: true,
@@ -387,17 +388,18 @@ const AddModal: React.FC<AddModalProps> = ({
     setKeywords(newKeywords)
   }
   
-    const handleSubmit = async (values: any) => {
+  const handleSubmit = async (values: any) => {
+    const minimum = values.executionMode === 'PAPER' ? 0.01 : 1
     // 前端校验
     if (values.copyMode === 'FIXED') {
-      if (!values.fixedAmount || Number(values.fixedAmount) < 1) {
-        message.error(t('copyTradingAdd.fixedAmountMin') || '固定金额必须 >= 1')
+      if (!values.fixedAmount || Number(values.fixedAmount) < minimum) {
+        message.error(`固定金額必須 >= ${minimum}`)
         return
       }
     }
     
-    if (values.copyMode === 'RATIO' && values.minOrderSize !== undefined && values.minOrderSize !== null && Number(values.minOrderSize) < 1) {
-      message.error(t('copyTradingAdd.minOrderSizeMin') || '最小金额必须 >= 1')
+    if (values.copyMode === 'RATIO' && values.minOrderSize !== undefined && values.minOrderSize !== null && Number(values.minOrderSize) < minimum) {
+      message.error(`單筆最小金額必須 >= ${minimum}`)
       return
     }
     
@@ -488,7 +490,7 @@ const AddModal: React.FC<AddModalProps> = ({
             copyMode: 'RATIO',
             copyRatio: 100,
             maxOrderSize: 1000,
-            minOrderSize: 1,
+            minOrderSize: 0.01,
             maxDailyLoss: 10000,
             maxDailyOrders: 100,
             priceTolerance: 5,
@@ -526,7 +528,14 @@ const AddModal: React.FC<AddModalProps> = ({
           >
             <Radio.Group
               buttonStyle="solid"
-              onChange={() => form.setFieldValue('accountId', undefined)}
+              onChange={(event) => {
+                const mode = event.target.value
+                form.setFieldValue('accountId', undefined)
+                form.setFieldValue('minOrderSize', mode === 'PAPER' ? 0.01 : 1)
+                if (mode === 'LIVE' && Number(form.getFieldValue('fixedAmount') || 0) < 1) {
+                  form.setFieldValue('fixedAmount', 1)
+                }
+              }}
             >
               <Radio.Button value="PAPER">模擬跟單（推薦）</Radio.Button>
               <Radio.Button value="LIVE">實盤跟單</Radio.Button>
@@ -786,8 +795,8 @@ const AddModal: React.FC<AddModalProps> = ({
                       if (isNaN(amount)) {
                         return Promise.reject(new Error(t('copyTradingAdd.invalidNumber') || '请输入有效的数字'))
                       }
-                      if (amount < 1) {
-                        return Promise.reject(new Error(t('copyTradingAdd.fixedAmountMin') || '固定金额必须 >= 1'))
+                      if (amount < minimumOrderAmount) {
+                        return Promise.reject(new Error(`固定金額必須 >= ${minimumOrderAmount}`))
                       }
                     }
                     return Promise.resolve()
@@ -796,11 +805,11 @@ const AddModal: React.FC<AddModalProps> = ({
               ]}
             >
               <InputNumber
-                min={1}
+                min={minimumOrderAmount}
                 step={0.0001}
                 precision={4}
                 style={{ width: '100%' }}
-                placeholder={t('copyTradingAdd.fixedAmountPlaceholder') || '固定金额，不随 Leader 订单大小变化，必须 >= 1'}
+                placeholder={`固定金額，不隨 Leader 訂單大小變化，必須 >= ${minimumOrderAmount}`}
                 formatter={(value) => {
                   if (!value && value !== 0) return ''
                   const num = parseFloat(value.toString())
@@ -836,15 +845,15 @@ const AddModal: React.FC<AddModalProps> = ({
               <Form.Item
                 label={t('copyTradingAdd.minOrderSize') || '单笔订单最小金额 ($)'}
                 name="minOrderSize"
-                tooltip={t('copyTradingAdd.minOrderSizeTooltip') || '比例模式下，限制单笔跟单订单的最小金额下限，必须 >= 1'}
+                tooltip={`比例模式的單筆最低金額；${executionMode === 'PAPER' ? '模擬模式可低至 0.01' : '實盤模式最低 1'}`}
                 rules={[
                   { 
                     validator: (_, value) => {
                       if (value === undefined || value === null || value === '') {
                         return Promise.resolve()
                       }
-                      if (typeof value === 'number' && value < 1) {
-                        return Promise.reject(new Error(t('copyTradingAdd.minOrderSizeMin') || '最小金额必须 >= 1'))
+                      if (typeof value === 'number' && value < minimumOrderAmount) {
+                        return Promise.reject(new Error(`單筆最小金額必須 >= ${minimumOrderAmount}`))
                       }
                       return Promise.resolve()
                     }
@@ -852,11 +861,11 @@ const AddModal: React.FC<AddModalProps> = ({
                 ]}
               >
                 <InputNumber
-                  min={1}
+                  min={minimumOrderAmount}
                   step={0.0001}
                   precision={4}
                   style={{ width: '100%' }}
-                  placeholder={t('copyTradingAdd.minOrderSizePlaceholder') || '仅在比例模式下生效，必须 >= 1（可选）'}
+                  placeholder={`僅在比例模式生效，必須 >= ${minimumOrderAmount}`}
                   formatter={(value) => {
                     if (!value && value !== 0) return ''
                     const num = parseFloat(value.toString())

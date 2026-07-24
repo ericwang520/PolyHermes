@@ -27,6 +27,7 @@ const EditModal: React.FC<EditModalProps> = ({
   const [fetching, setFetching] = useState(true)
   const [copyTrading, setCopyTrading] = useState<CopyTrading | null>(null)
   const [copyMode, setCopyMode] = useState<'RATIO' | 'FIXED'>('RATIO')
+  const minimumOrderAmount = copyTrading?.executionMode === 'PAPER' ? 0.01 : 1
     const [originalEnabled, setOriginalEnabled] = useState<boolean>(true)
     const [keywords, setKeywords] = useState<string[]>([])
     const keywordInputRef = useRef<InputRef>(null)
@@ -184,14 +185,14 @@ const EditModal: React.FC<EditModalProps> = ({
   
   const handleSubmit = async (values: any) => {
     if (values.copyMode === 'FIXED') {
-      if (!values.fixedAmount || Number(values.fixedAmount) < 1) {
-        message.error('固定金额必须 >= 1')
+      if (!values.fixedAmount || Number(values.fixedAmount) < minimumOrderAmount) {
+        message.error(`固定金額必須 >= ${minimumOrderAmount}`)
         return
       }
     }
     
-    if (values.copyMode === 'RATIO' && values.minOrderSize !== undefined && values.minOrderSize !== null && Number(values.minOrderSize) < 1) {
-      message.error('最小金额必须 >= 1')
+    if (values.copyMode === 'RATIO' && values.minOrderSize !== undefined && values.minOrderSize !== null && Number(values.minOrderSize) < minimumOrderAmount) {
+      message.error(`單筆最小金額必須 >= ${minimumOrderAmount}`)
       return
     }
     
@@ -502,8 +503,8 @@ const EditModal: React.FC<EditModalProps> = ({
                       if (isNaN(amount)) {
                         return Promise.reject(new Error(t('copyTradingEdit.invalidNumber') || '请输入有效的数字'))
                       }
-                      if (amount < 1) {
-                        return Promise.reject(new Error(t('copyTradingEdit.fixedAmountMin') || '固定金额必须 >= 1'))
+                      if (amount < minimumOrderAmount) {
+                        return Promise.reject(new Error(`固定金額必須 >= ${minimumOrderAmount}`))
                       }
                     }
                     return Promise.resolve()
@@ -512,11 +513,11 @@ const EditModal: React.FC<EditModalProps> = ({
               ]}
             >
               <InputNumber
-                min={1}
+                min={minimumOrderAmount}
                 step={0.0001}
                 precision={4}
                 style={{ width: '100%' }}
-                placeholder={t('copyTradingEdit.fixedAmountPlaceholder') || '固定金额，不随 Leader 订单大小变化，必须 >= 1'}
+                placeholder={`固定金額，不隨 Leader 訂單大小變化，必須 >= ${minimumOrderAmount}`}
                 formatter={(value) => {
                   if (!value && value !== 0) return ''
                   const num = parseFloat(value.toString())
@@ -552,15 +553,15 @@ const EditModal: React.FC<EditModalProps> = ({
               <Form.Item
                 label={t('copyTradingEdit.minOrderSize') || '单笔订单最小金额 ($)'}
                 name="minOrderSize"
-                tooltip={t('copyTradingEdit.minOrderSizeTooltip') || '比例模式下，限制单笔跟单订单的最小金额下限，必须 >= 1'}
+                tooltip={`比例模式的單筆最低金額；${copyTrading?.executionMode === 'PAPER' ? '模擬模式可低至 0.01' : '實盤模式最低 1'}`}
                 rules={[
                   { 
                     validator: (_, value) => {
                       if (value === undefined || value === null || value === '') {
                         return Promise.resolve()
                       }
-                      if (typeof value === 'number' && value < 1) {
-                        return Promise.reject(new Error(t('copyTradingEdit.minOrderSizeMin') || '最小金额必须 >= 1'))
+                      if (typeof value === 'number' && value < minimumOrderAmount) {
+                        return Promise.reject(new Error(`單筆最小金額必須 >= ${minimumOrderAmount}`))
                       }
                       return Promise.resolve()
                     }
@@ -568,11 +569,11 @@ const EditModal: React.FC<EditModalProps> = ({
                 ]}
               >
                 <InputNumber
-                  min={1}
+                  min={minimumOrderAmount}
                   step={0.0001}
                   precision={4}
                   style={{ width: '100%' }}
-                  placeholder={t('copyTradingEdit.minOrderSizePlaceholder') || '仅在比例模式下生效，必须 >= 1（可选）'}
+                  placeholder={`僅在比例模式生效，必須 >= ${minimumOrderAmount}`}
                   formatter={(value) => {
                     if (!value && value !== 0) return ''
                     const num = parseFloat(value.toString())

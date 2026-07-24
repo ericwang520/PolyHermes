@@ -11,11 +11,18 @@ import com.wrbug.polymarketbot.entity.CopyTrading
 import com.wrbug.polymarketbot.repository.CopySimulationPositionRepository
 import com.wrbug.polymarketbot.repository.CopySimulationSessionRepository
 import com.wrbug.polymarketbot.repository.CopySimulationTradeRepository
+import com.wrbug.polymarketbot.service.system.TelegramNotificationService
 import com.wrbug.polymarketbot.util.toSafeBigDecimal
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import org.springframework.transaction.support.TransactionSynchronization
+import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.Instant
@@ -26,9 +33,11 @@ import java.time.ZoneOffset
 class CopySimulationService(
     private val sessionRepository: CopySimulationSessionRepository,
     private val positionRepository: CopySimulationPositionRepository,
-    private val tradeRepository: CopySimulationTradeRepository
+    private val tradeRepository: CopySimulationTradeRepository,
+    private val telegramNotificationService: TelegramNotificationService? = null
 ) {
     private val logger = LoggerFactory.getLogger(CopySimulationService::class.java)
+    private val notificationScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     @Transactional
     fun process(copyTrading: CopyTrading, leaderTrade: TradeResponse): Result<Unit> {
@@ -296,7 +305,7 @@ class CopySimulationService(
         notional: BigDecimal = BigDecimal.ZERO,
         realizedPnl: BigDecimal = BigDecimal.ZERO
     ) {
-        tradeRepository.save(
+        val recordedTrade = tradeRepository.save(
             CopySimulationTrade(
                 sessionId = session.id!!,
                 copyTradingId = config.id!!,
@@ -314,7 +323,98 @@ class CopySimulationService(
                 eventTime = parseEventTime(trade.timestamp)
             )
         )
+        scheduleNotificationAfterCommit(config, session, recordedTrade)
     }
+
+    private fun scheduleNotificationAfterCommit(
+        config: CopyTrading,
+        session: CopySimulationSession,
+        trade: CopySimulationTrade
+    ) {
+        val service = telegramNotificationService ?: return
+        if (!shouldSendNotification(config, trade.status)) return
+        val message = buildNotificationMessage(config, session, trade)
+        val send = {
+            notificationScope.launch {
+                runCatching { service.sendMessage(message) }
+                    .onFailure {
+                        logger.warn(
+                            "发送模拟订单 Telegram 通知失败: copyTradingId={}, tradeId={}, error={}",
+                            config.id,
+                            trade.leaderTradeId,
+                            it.message
+                        )
+                    }
+            }
+        }
+
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(
+                object : TransactionSynchronization {
+                    override fun afterCommit() {
+                        send()
+                    }
+                }
+            )
+        } else {
+            send()
+        }
+    }
+
+    internal fun shouldSendNotification(config: CopyTrading, status: String): Boolean =
+        when (status) {
+            "FILLED" -> true
+            "FILTERED", "SKIPPED" -> config.pushFilteredOrders
+            "REJECTED" -> config.pushFailedOrders
+            else -> false
+        }
+
+    internal fun buildNotificationMessage(
+        config: CopyTrading,
+        session: CopySimulationSession,
+        trade: CopySimulationTrade
+    ): String {
+        val statusLabel = when (trade.status) {
+            "FILLED" -> "成交"
+            "FILTERED" -> "已過濾"
+            "REJECTED" -> "已拒絕"
+            "SKIPPED" -> "已跳過"
+            else -> trade.status
+        }
+        val outcome = trade.outcomeIndex?.let { if (it == 0) "YES / 0" else "NO / $it" } ?: "未知"
+        val price = trade.price?.plain() ?: "-"
+        val reason = trade.reason?.takeIf { it.isNotBlank() }?.let {
+            "\n⚠️ <b>原因：</b>${escapeHtml(it)}"
+        }.orEmpty()
+        val realized = if (trade.realizedPnl.compareTo(BigDecimal.ZERO) == 0) {
+            ""
+        } else {
+            "\n📈 <b>本次已實現：</b><code>${trade.realizedPnl.plain()} USDC</code>"
+        }
+
+        return """
+            🧪 <b>模擬訂單$statusLabel</b>
+
+            📋 <b>配置：</b>${escapeHtml(config.configName ?: "未命名配置")}
+            🔄 <b>動作：</b><code>${escapeHtml(trade.action)}</code>
+            🎯 <b>結果：</b><code>${escapeHtml(outcome)}</code>
+            💵 <b>價格：</b><code>$price</code>
+            📦 <b>數量：</b><code>${trade.quantity.plain()} shares</code>
+            💰 <b>金額：</b><code>${trade.notional.plain()} USDC</code>$realized
+            🏦 <b>模擬可用資金：</b><code>${session.cashBalance.plain()} USDC</code>
+            🔎 <b>市場：</b><code>${escapeHtml(trade.marketId)}</code>$reason
+
+            ⚠️ <b>這是模擬交易，沒有送出真實訂單。</b>
+        """.trimIndent()
+    }
+
+    private fun BigDecimal.plain(): String =
+        stripTrailingZeros().toPlainString()
+
+    private fun escapeHtml(value: String): String =
+        value.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
 
     private fun parseEventTime(raw: String): Long =
         raw.toLongOrNull()?.let { if (it < 10_000_000_000L) it * 1000 else it }

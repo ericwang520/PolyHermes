@@ -116,4 +116,124 @@ class CopySimulationServiceTest {
         verify(sessionRepository, never()).findByCopyTradingId(11)
         verify(tradeRepository, never()).save(any(CopySimulationTrade::class.java))
     }
+
+    @Test
+    fun `paper ratio buy can fill below one USDC when minimum is one cent`() {
+        var savedTrade: CopySimulationTrade? = null
+
+        `when`(tradeRepository.existsByCopyTradingIdAndLeaderTradeIdAndAction(12, "trade-micro", "BUY"))
+            .thenReturn(false)
+        `when`(sessionRepository.findByCopyTradingId(12)).thenReturn(
+            CopySimulationSession(
+                id = 2,
+                copyTradingId = 12,
+                initialCash = BigDecimal("10"),
+                cashBalance = BigDecimal("10")
+            )
+        )
+        `when`(
+            tradeRepository.countFilledSince(
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyLong()
+            )
+        ).thenReturn(0)
+        `when`(
+            tradeRepository.sumRealizedPnlSince(
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyLong()
+            )
+        ).thenReturn(BigDecimal.ZERO)
+        `when`(
+            positionRepository.findByCopyTradingIdAndMarketIdAndOutcomeIndex(12, "condition-micro", 0)
+        ).thenReturn(null)
+        `when`(positionRepository.save(any(CopySimulationPosition::class.java))).thenAnswer {
+            it.getArgument<CopySimulationPosition>(0)
+        }
+        `when`(sessionRepository.save(any(CopySimulationSession::class.java))).thenAnswer {
+            it.getArgument<CopySimulationSession>(0)
+        }
+        `when`(tradeRepository.save(any(CopySimulationTrade::class.java))).thenAnswer {
+            it.getArgument<CopySimulationTrade>(0).also { trade -> savedTrade = trade }
+        }
+
+        val result = service.process(
+            copyTrading = CopyTrading(
+                id = 12,
+                accountId = 1,
+                leaderId = 2,
+                executionMode = "PAPER",
+                copyMode = "RATIO",
+                copyRatio = BigDecimal("0.01"),
+                minOrderSize = BigDecimal("0.01"),
+                maxOrderSize = BigDecimal("5")
+            ),
+            leaderTrade = TradeResponse(
+                id = "trade-micro",
+                market = "condition-micro",
+                side = "BUY",
+                price = "0.5",
+                size = "62",
+                timestamp = "1760000000",
+                user = "0xleader",
+                outcomeIndex = 0,
+                tokenId = "456"
+            )
+        )
+
+        assertTrue(result.isSuccess)
+        assertEquals("FILLED", savedTrade!!.status)
+        assertEquals(0, savedTrade!!.notional.compareTo(BigDecimal("0.31")))
+    }
+
+    @Test
+    fun `paper notification preferences always include fills and gate other statuses`() {
+        val defaultConfig = CopyTrading(id = 13, accountId = 1, leaderId = 2, executionMode = "PAPER")
+        val verboseConfig = defaultConfig.copy(
+            pushFailedOrders = true,
+            pushFilteredOrders = true
+        )
+
+        assertTrue(service.shouldSendNotification(defaultConfig, "FILLED"))
+        assertEquals(false, service.shouldSendNotification(defaultConfig, "FILTERED"))
+        assertEquals(false, service.shouldSendNotification(defaultConfig, "REJECTED"))
+        assertTrue(service.shouldSendNotification(verboseConfig, "FILTERED"))
+        assertTrue(service.shouldSendNotification(verboseConfig, "SKIPPED"))
+        assertTrue(service.shouldSendNotification(verboseConfig, "REJECTED"))
+    }
+
+    @Test
+    fun `paper notification is unmistakably marked as simulated`() {
+        val message = service.buildNotificationMessage(
+            config = CopyTrading(
+                id = 14,
+                accountId = 1,
+                leaderId = 2,
+                executionMode = "PAPER",
+                configName = "Bosona paper"
+            ),
+            session = CopySimulationSession(
+                id = 3,
+                copyTradingId = 14,
+                initialCash = BigDecimal("300"),
+                cashBalance = BigDecimal("299.69")
+            ),
+            trade = CopySimulationTrade(
+                sessionId = 3,
+                copyTradingId = 14,
+                leaderTradeId = "trade-notify",
+                action = "BUY",
+                marketId = "condition-notify",
+                outcomeIndex = 0,
+                price = BigDecimal("0.5"),
+                quantity = BigDecimal("0.62"),
+                notional = BigDecimal("0.31"),
+                status = "FILLED",
+                eventTime = 1760000000000
+            )
+        )
+
+        assertTrue(message.contains("模擬訂單成交"))
+        assertTrue(message.contains("0.31 USDC"))
+        assertTrue(message.contains("沒有送出真實訂單"))
+    }
 }
